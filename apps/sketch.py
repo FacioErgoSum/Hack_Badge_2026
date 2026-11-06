@@ -2,7 +2,12 @@
 
 Left knob moves the pen left/right, right knob moves it up/down (clockwise =
 right / up). The trace is drawn into the framebuffer as you turn, and the
-e-paper redraws shortly after the knobs stop.
+e-paper redraws shortly after the knobs stop. The pen stops at the edges of
+the white screen.
+
+LEDs: 0-3 animate the X knob, 4-7 the Y knob while turning (a dot spins the
+way you turn; that side flashes red when the pen hits a wall). When idle they
+show status: green = up to date, yellow = waiting to redraw, cyan = panel busy.
 
 Buttons:
   User A  - erase (redraw the blank frame with a cleaning flash)
@@ -12,13 +17,15 @@ Buttons:
 
 Hardware
 --------
-Each knob is an AS5600 SAO whose analog OUT pin is wired to the SAO's GPIO1:
-  SAO1 GPIO1 = GPIO2  -> X knob
-  SAO3 GPIO1 = GPIO7  -> Y knob
-Both are ADC1 pins. On launch the app also writes the AS5600 CONF register over
-the shared SAO I2C bus (both chips sit at 0x36 and take the same write) to set
-the analog output to 10-90 % of VDD, which keeps it inside the ESP32-S3 ADC's
-~3.1 V range. If that write fails, full-range output (0-100 %) is assumed.
+Each knob is an AS5600 SAO whose analog OUT pin is wired to the SAO's GPIO1.
+The app probes every SAO GPIO1 pin (pull-up vs pull-down: a floating pin
+swings, a driven AS5600 output doesn't) and uses the first two it finds as
+X then Y. Set X_KNOB_PIN / Y_KNOB_PIN to force specific pins.
+
+On launch the AS5600 CONF register is written over the shared SAO I2C bus
+(both chips sit at 0x36 and take the same write) to set the analog output to
+10-90 % of VDD, inside the ESP32-S3 ADC's ~3.1 V range. If that write fails,
+full-range output (0-100 %) is assumed.
 """
 
 import asyncio as aio
@@ -32,21 +39,32 @@ from lib.led_bar import leds
 
 FRAME_PNG = "/data/graphics/sketch_frame.png"
 
-# Drawable area inside the frame's white screen (inclusive)
-X_MIN, Y_MIN, X_MAX, Y_MAX = 80, 68, 880, 522
+LINE_W = 3              # trace thickness in pixels
+# White screen in sketch_frame.png is x 70..890, y 58..532 with 18 px rounded
+# corners. Keep the whole line inside it, clear of the corners.
+_INSET = 12 + LINE_W
+X_MIN, Y_MIN, X_MAX, Y_MAX = 70 + _INSET, 58 + _INSET, 890 - _INSET, 532 - _INSET
 
-X_KNOB_PIN = 2          # SAO1 GPIO1
-Y_KNOB_PIN = 7          # SAO3 GPIO1
+# SAO GPIO1 pins (from lib/sao.py), probed in this order
+CANDIDATE_PINS = ((2, "SAO1"), (4, "SAO2"), (7, "SAO3"))
+X_KNOB_PIN = None       # None = auto-detect; or e.g. 2
+Y_KNOB_PIN = None       # None = auto-detect; or e.g. 7
 SWAP_KNOBS = False      # if the knobs come out backwards
 INVERT_X = False
 INVERT_Y = False
 
 PX_PER_REV = 240        # pen travel per full knob turn
-LINE_W = 3              # trace thickness in pixels
 DEADBAND = 12           # counts (of 4096) of ADC noise to ignore
 ADC_SAMPLES = 8         # readings averaged per poll
 IDLE_REFRESH_MS = 700   # refresh this long after the knobs stop...
 MAX_WAIT_MS = 4000      # ...or at most this long while still drawing
+DEBUG_KNOBS = True      # print knob voltages/angles while turning
+
+LED_TURN_HOLD_MS = 400  # keep the turning animation this long after a turn
+LED_DOT_STEPS = 16      # dot steps per knob revolution
+X_COLOR = "cyan"
+Y_COLOR = "magenta"
+WALL_COLOR = "red"
 
 AS5600_ADDR = 0x36
 _VDD_UV = 3_300_000
@@ -58,7 +76,6 @@ def set_reduced_analog_range():
     try:
         from lib.sao import i2c
         # CONF is 0x07 (high byte) / 0x08 (low byte). Low byte: OUTS bits 5:4.
-        # Everything else at defaults (no hysteresis, slow filter, normal power).
         i2c.writeto_mem(AS5600_ADDR, 0x07, bytes([0x00, 0x10]))
         print("Sketch: AS5600 analog output set to 10-90 % of VDD")
         return True
@@ -67,28 +84,58 @@ def set_reduced_analog_range():
         return False
 
 
+def _avg_uv(adc, n=8):
+    t = 0
+    for _ in range(n):
+        t += adc.read_uv()
+    return t // n
+
+
+def probe_pin(pin):
+    """Return (driven, volts). A floating pin follows the internal pull,
+    a pin driven by the AS5600 output barely moves."""
+    P = machine.Pin
+    adc = machine.ADC(P(pin), atten=machine.ADC.ATTN_11DB)
+    P(pin, P.IN, P.PULL_DOWN)
+    time.sleep_ms(3)
+    lo = _avg_uv(adc)
+    P(pin, P.IN, P.PULL_UP)
+    time.sleep_ms(3)
+    hi = _avg_uv(adc)
+    P(pin, P.IN, None)
+    time.sleep_ms(3)
+    mid = _avg_uv(machine.ADC(P(pin), atten=machine.ADC.ATTN_11DB))
+    driven = abs(hi - lo) < 300_000
+    print(f"Sketch: GPIO{pin}: pulled down {lo / 1e6:.2f} V, up {hi / 1e6:.2f} V, "
+          f"free {mid / 1e6:.2f} V -> {'AS5600' if driven else 'floating'}")
+    return driven
+
+
 class AnalogKnob:
     """AS5600 OUT pin read with the ESP32-S3 ADC."""
 
     def __init__(self, pin, label, reduced_range):
+        self.pin = pin
         self.label = label
+        machine.Pin(pin, machine.Pin.IN, None)
         self.adc = machine.ADC(machine.Pin(pin), atten=machine.ADC.ATTN_11DB)
         if reduced_range:
             self.lo, self.hi = _VDD_UV * 10 // 100, _VDD_UV * 90 // 100
         else:
             self.lo, self.hi = 0, _VDD_UV
         self.last = None
+        self.uv = 0
+        self.raw_angle = 0
 
     def __str__(self):
-        return self.label
+        return f"{self.label}/GPIO{self.pin}"
 
     def angle(self):
-        uv = 0
-        for _ in range(ADC_SAMPLES):
-            uv += self.adc.read_uv()
-        uv //= ADC_SAMPLES
+        uv = _avg_uv(self.adc, ADC_SAMPLES)
+        self.uv = uv
         a = (uv - self.lo) * 4096 // (self.hi - self.lo)
-        return min(max(a, 0), 4095)
+        self.raw_angle = min(max(a, 0), 4095)
+        return self.raw_angle
 
     def volts(self):
         return self.adc.read_uv() / 1_000_000
@@ -108,14 +155,22 @@ class AnalogKnob:
 
 def find_knobs():
     reduced = set_reduced_analog_range()
+    labels = {p: l for p, l in CANDIDATE_PINS}
+    if X_KNOB_PIN is not None or Y_KNOB_PIN is not None:
+        pins = [p for p in (X_KNOB_PIN, Y_KNOB_PIN) if p is not None]
+    else:
+        pins = [p for p, _ in CANDIDATE_PINS if probe_pin(p)]
+        if not pins:
+            print("Sketch: no driven SAO GPIO1 pins found, trying SAO1 + SAO3 anyway")
+            pins = [2, 7]
     knobs = []
-    for pin, label in ((X_KNOB_PIN, "SAO1"), (Y_KNOB_PIN, "SAO3")):
+    for pin in pins[:2]:
         try:
-            k = AnalogKnob(pin, label, reduced)
-            print(f"Sketch: knob {label} on GPIO{pin}: {k.volts():.2f} V")
+            k = AnalogKnob(pin, labels.get(pin, "SAO?"), reduced)
+            print(f"Sketch: knob {k}: {k.volts():.2f} V")
             knobs.append(k)
         except Exception as ex:
-            print(f"Sketch: knob {label} on GPIO{pin} failed: {ex}")
+            print(f"Sketch: knob on GPIO{pin} failed: {ex}")
     return knobs
 
 
@@ -148,6 +203,12 @@ class SketchApp(BaseApp):
         self._dirty = False
         self._last_move = 0
         self._first_change = 0
+        # LED animation state
+        self._phase = [0.0, 0.0]          # X, Y dot phase (in LED steps)
+        self._turn_ms = [None, None]      # last time each knob turned
+        self._wall_ms = [None, None]      # last time each axis hit a wall
+        self._led_frame = None
+        self._dbg_ms = 0
 
     # ---------------- setup ----------------
     def _setup_knobs(self):
@@ -157,13 +218,14 @@ class SketchApp(BaseApp):
         ks = list(reversed(self.knobs)) if SWAP_KNOBS else self.knobs
         self.x_knob = ks[0] if len(ks) > 0 else None
         self.y_knob = ks[1] if len(ks) > 1 else None
+        print(f"Sketch: X = {self.x_knob}, Y = {self.y_knob}")
 
     def _status_text(self):
         if self.x_knob and self.y_knob:
             return None
         if self.x_knob:
             return f"1 knob ({self.x_knob}) - B switches X/Y"
-        return "no knobs - check SAO1/SAO3"
+        return "no knobs - check SAO addons"
 
     def _blank(self, flash=True):
         """Draw the empty frame and push it with a cleaning flash."""
@@ -178,6 +240,7 @@ class SketchApp(BaseApp):
         self._pen_dot()
         display.update(fast=True, flash=flash)
         self._dirty = False
+        self._led_frame = None
 
     def _pen_dot(self):
         r = LINE_W // 2
@@ -193,40 +256,68 @@ class SketchApp(BaseApp):
                 display.black.line(x0 + ox, y0 + oy, x1 + ox, y1 + oy, 1)
                 display.red.line(x0 + ox, y0 + oy, x1 + ox, y1 + oy, 0)
 
-    def _poll_knobs(self):
-        scale = PX_PER_REV / 4096
-        dx = dy = 0.0
+    def _read_deltas(self):
+        """Knob turns in counts as (x_counts, y_counts), axis-mapped."""
+        cx = cy = 0
         if self.x_knob and self.y_knob:
-            dx = self.x_knob.delta() * scale
-            dy = -self.y_knob.delta() * scale     # clockwise = up
+            cx = self.x_knob.delta()
+            cy = self.y_knob.delta()
         elif self.x_knob:
-            d = self.x_knob.delta() * scale
+            d = self.x_knob.delta()
             if self.single_axis == "x":
-                dx = d
+                cx = d
             else:
-                dy = -d
+                cy = d
         if INVERT_X:
-            dx = -dx
+            cx = -cx
         if INVERT_Y:
-            dy = -dy
-        if not dx and not dy:
-            return
+            cy = -cy
+        return cx, cy
 
-        self._fx += dx
-        self._fy += dy
+    def _poll_knobs(self):
+        cx, cy = self._read_deltas()
+        if not cx and not cy:
+            return
+        now = time.ticks_ms()
+        steps_per_count = LED_DOT_STEPS / 4096
+        if cx:
+            self._turn_ms[0] = now
+            self._phase[0] += cx * steps_per_count
+        if cy:
+            self._turn_ms[1] = now
+            self._phase[1] += cy * steps_per_count
+
+        if DEBUG_KNOBS and time.ticks_diff(now, self._dbg_ms) > 250:
+            self._dbg_ms = now
+            parts = []
+            for name, k in (("X", self.x_knob), ("Y", self.y_knob)):
+                if k:
+                    parts.append(f"{name} {k.uv / 1e6:.2f}V a={k.raw_angle}")
+            print("Sketch: " + " | ".join(parts) + f" pen=({self.px},{self.py})")
+
+        scale = PX_PER_REV / 4096
+        self._fx += cx * scale
+        self._fy -= cy * scale          # clockwise = up
         mx = int(self._fx)
         my = int(self._fy)
         if not mx and not my:
             return
         self._fx -= mx
         self._fy -= my
-        nx = min(max(self.px + mx, X_MIN), X_MAX)
-        ny = min(max(self.py + my, Y_MIN), Y_MAX)
+
+        tx, ty = self.px + mx, self.py + my
+        nx = min(max(tx, X_MIN), X_MAX)
+        ny = min(max(ty, Y_MIN), Y_MAX)
+        if nx != tx:
+            self._wall_ms[0] = now
+            self._fx = 0.0          # don't bank turns against the wall
+        if ny != ty:
+            self._wall_ms[1] = now
+            self._fy = 0.0
         if nx == self.px and ny == self.py:
             return
         self._line(self.px, self.py, nx, ny)
         self.px, self.py = nx, ny
-        now = time.ticks_ms()
         if not self._dirty:
             self._first_change = now
         self._dirty = True
@@ -244,13 +335,45 @@ class SketchApp(BaseApp):
             display.update(fast=True, flash=False, passes=1, bw=True, auto_full=False)
             self._dirty = False
 
-    def _leds(self):
+    # ---------------- LEDs ----------------
+    def _recent(self, t, now, ms=LED_TURN_HOLD_MS):
+        return t is not None and time.ticks_diff(now, t) < ms
+
+    def _knob_leds(self, axis, now):
+        """4 LEDs for one knob: a spinning dot, or red at a wall, or None if idle."""
+        if self._recent(self._wall_ms[axis], now, 250):
+            return [WALL_COLOR] * 4
+        if not self._recent(self._turn_ms[axis], now):
+            return None
+        color = X_COLOR if axis == 0 else Y_COLOR
+        pos = int(self._phase[axis]) % 4
+        vals = ["off"] * 4
+        vals[pos] = color
+        return vals
+
+    def _status_color(self):
         if not display.is_done_updating():
-            leds.fill("cyan")       # panel busy
-        elif self._dirty:
-            leds.fill("yellow")     # drawn, waiting to refresh
+            return "cyan"       # panel busy
+        if self._dirty:
+            return "yellow"     # drawn, waiting to refresh
+        return "green"          # up to date
+
+    def _update_leds(self):
+        if leds.sequence_func is not None:
+            self._led_frame = None  # redraw once the blink etc. finishes
+            return
+        now = time.ticks_ms()
+        left = self._knob_leds(0, now)
+        right = self._knob_leds(1, now)
+        if left is None and right is None:
+            frame = [self._status_color()] * 8
         else:
-            leds.fill("green")      # up to date
+            dim = "off"
+            frame = (left or [dim] * 4) + (right or [dim] * 4)
+        frame = tuple(frame)
+        if frame != self._led_frame:
+            self._led_frame = frame
+            leds.show(frame)
 
     # ---------------- app loop ----------------
     async def arun(self):
@@ -258,7 +381,6 @@ class SketchApp(BaseApp):
             if self.launched:
                 self._setup_knobs()
                 self._blank(flash=True)
-                self._led_state = None
 
             if UserA.pressed():
                 print("Sketch: erase")
@@ -275,11 +397,7 @@ class SketchApp(BaseApp):
 
             self._poll_knobs()
             self._maybe_refresh()
-
-            state = (display.is_done_updating(), self._dirty)
-            if state != getattr(self, "_led_state", None) and leds.sequence_func is None:
-                self._led_state = state
-                self._leds()
+            self._update_leds()
         except Exception as ex:
             import sys
             print("Sketch hit an exception")
