@@ -67,6 +67,9 @@ FAST_BY_DEFAULT = True     # display.update() uses the short waveform
 FULL_REFRESH_EVERY = 10    # after this many fast updates, do one full refresh
 FAST_PASSES = 3            # run the fast waveform this many times per update
                            # (1 pass leaves ghosting / washed-out red)
+FLASH_BEFORE_FAST = True   # flash solid frames before each fast update
+FLASH_SEQUENCE = ("black", "white")   # any of "black", "white", "red"
+FLASH_PASSES = 1           # waveform passes per flash frame
 _SPI_CHUNK = const(4096)   # bytes per SPI write before yielding to asyncio
 _BUSY_POLL_MS = const(10)
 
@@ -238,6 +241,12 @@ class EPaperDisplay:
         self.fast_by_default = FAST_BY_DEFAULT
         self.full_refresh_every = FULL_REFRESH_EVERY
         self.fast_passes = FAST_PASSES
+        self.flash_before_fast = FLASH_BEFORE_FAST
+        self.flash_sequence = FLASH_SEQUENCE
+        self.flash_passes = FLASH_PASSES
+        self._request_flash = None
+        self._solid_ff = None  # lazily allocated all-ones half plane
+        self._solid_00 = None  # lazily allocated all-zeros half plane
         # None = unknown, True/False = whether the CoG accepts a second 0x15
         # refresh without a full re-init. Learned on the first multi-pass update.
         self._repeat_refresh_ok = None
@@ -306,21 +315,32 @@ class EPaperDisplay:
                               self._framebuffer_black, self._framebuffer_red)
         disp.flush_ready()
 
-    def update(self, fast=None):
+    def update(self, fast=None, flash=None):
         """Done drawing: push the framebuffers to the panel.
 
         fast=None  -> use display.fast_by_default
         fast=True  -> short waveform (~3.5 s), may ghost slightly over time
         fast=False -> panel's own full waveform (~33 s), best quality
         Returns immediately; the refresh runs in the background.
+        Fast updates run display.fast_passes times (default 3) to drive the
+        pigment fully and clear ghosting. Set display.fast_passes = 1 for speed.
+
+        flash=None  -> use display.flash_before_fast (fast updates only)
+        flash=True  -> flash display.flash_sequence (black, white) first
+        flash=False -> no flash
         """
         self._request_fast = self.fast_by_default if fast is None else bool(fast)
+        self._request_flash = flash
         self._display_updated.clear()
         self._framebuffer_ready.set()
 
     def full_update(self):
         """Shortcut for update(fast=False)."""
         self.update(fast=False)
+
+    def clean(self):
+        """Redraw what's in the framebuffer with a flash, to clear ghosting."""
+        self.update(fast=True, flash=True)
 
     def clear(self):
         """Clear framebuffers to full white"""
@@ -366,6 +386,9 @@ class EPaperDisplay:
             # refresh below triggers another refresh instead of being dropped.
             self._framebuffer_ready.clear()
             fast = self._request_fast
+            flash = self._request_flash
+            if flash is None:
+                flash = self.flash_before_fast
             if fast and self._fast_count >= self.full_refresh_every:
                 print("EPD: periodic full refresh to clear ghosting")
                 fast = False
@@ -376,7 +399,7 @@ class EPaperDisplay:
 
             try:
                 await self.global_update(black_left, red_left, black_right, red_right,
-                                         fast=fast, has_red=has_red)
+                                         fast=fast, has_red=has_red, flash=flash)
             except Exception as ex:
                 import sys
                 print("EPD: update failed")
@@ -393,28 +416,61 @@ class EPaperDisplay:
         lut = self._fast_lut(has_red) if fast else None
         if fast and lut is None:
             fast = False
-        print(f"EPD: {'fast' if fast else 'full'} update")
+        passes = max(1, int(self.fast_passes)) if fast else 1
+        print(f"EPD: {'fast x%d' % passes if fast else 'full'} update")
+        images = (black_left, red_left, black_right, red_right)
 
+        if passes > 1 and self._repeat_refresh_ok is False:
+            # This CoG ignores back-to-back refreshes: redo everything per pass
+            for p in range(passes):
+                await self._prepare(images, lut)
+                dt = await self._refresh_once()
+                await self._dcdc_soft_shutdown()
+                print(f"EPD: pass {p + 1}/{passes} (full cycle) {dt} ms")
+        else:
+            await self._prepare(images, lut)
+            p = 0
+            while p < passes:
+                dt = await self._refresh_once()
+                print(f"EPD: pass {p + 1}/{passes} {dt} ms")
+                if p == 1 and self._repeat_refresh_ok is None:
+                    # A real pass takes seconds; a few ms means it was ignored
+                    self._repeat_refresh_ok = dt > 500
+                    print(f"EPD: repeat refresh {'works' if self._repeat_refresh_ok else 'ignored, switching to full cycles'}")
+                    if not self._repeat_refresh_ok:
+                        await self._dcdc_soft_shutdown()
+                        for q in range(p, passes):
+                            await self._prepare(images, lut)
+                            dt = await self._refresh_once()
+                            await self._dcdc_soft_shutdown()
+                            print(f"EPD: pass {q + 1}/{passes} (full cycle) {dt} ms")
+                        break
+                p += 1
+            else:
+                await self._dcdc_soft_shutdown()
+
+        self.last_update_ms = time.ticks_diff(time.ticks_ms(), t_start)
+        print(f"EPD: total {self.last_update_ms} ms")
+
+    async def _prepare(self, images, lut):
+        """Reset, upload the image, init the CoG, load LUT, power up DC/DC."""
         await self._reset()
         t = time.ticks_ms()
-        await self._send_images(black_left, red_left, black_right, red_right)
+        await self._send_images(*images)
         t_upload = time.ticks_diff(time.ticks_ms(), t)
-
         t = time.ticks_ms()
         await self.cog_initial()
         if lut is not None:
             self._send_index_data(0xB0, lut)
         await self._dcdc_soft_start()
-        t_init = time.ticks_diff(time.ticks_ms(), t)
+        print(f"EPD: upload {t_upload} ms, init {time.ticks_diff(time.ticks_ms(), t)} ms")
 
-        t = time.ticks_ms()
+    async def _refresh_once(self):
+        """Trigger one waveform run and wait for it. Returns ms the panel was busy."""
         await self._display_refresh()
-        await self._dcdc_soft_shutdown()
-        t_panel = time.ticks_diff(time.ticks_ms(), t)
-
-        self.last_update_ms = time.ticks_diff(time.ticks_ms(), t_start)
-        print(f"EPD: upload {t_upload} ms, init {t_init} ms, "
-              f"panel {t_panel} ms, total {self.last_update_ms} ms")
+        t = time.ticks_ms()
+        await _wait_not_busy()
+        return time.ticks_diff(time.ticks_ms(), t) + 5
 
     def _fast_lut(self, has_red):
         if self._luts is None:
