@@ -383,18 +383,10 @@ class EPaperDisplay:
         self._display_updated.set()
         gc.collect()
 
-        # Set up lvgl. LVGL's C state survives a soft reset (Ctrl-D,
-        # `mpremote run`) while Python's heap doesn't, so a second init here
-        # would use stale pointers. Fail clearly instead.
-        try:
-            stale = lvgl.is_initialized()
-        except AttributeError:
-            stale = False
-        if stale:
-            raise RuntimeError(
-                "LVGL is still initialized from before a soft reset. Hard reset "
-                "(mpremote reset), or reuse the running display with "
-                "'mpremote resume run ...'")
+        # Set up lvgl. Note: LVGL's C state survives a soft reset (Ctrl-D,
+        # plain `mpremote run`) while Python's heap doesn't, so re-running this
+        # after one crashes in display_create. Hard reset instead, or use
+        # `mpremote resume run ...` to reuse the running display.
         lvgl.init()
         # Give LVGL a buffer 2-bytes-per-pixel for RGB565 format
         self._lv_draw_buf = bytearray(display_width * display_height * 2)
