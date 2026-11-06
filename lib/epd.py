@@ -71,15 +71,16 @@ FLASH_BEFORE_FAST = True   # flash solid frames before each fast update
 FLASH_SEQUENCE = ("black", "white")   # any of "black", "white", "red"
 FLASH_PASSES = 1           # waveform passes per flash frame
 PARTIAL_PASSES = 2         # waveform passes for update_partial()
-# update_partial() refreshes only a window around the new pixels via the CoG's
-# DRFW register (0x90). Its y units/offset aren't documented; these come from
-# the full-screen value the driver uses (x 0..0x3B bytes, y 0..0xA9 = 680 gate
-# lines / 4). Check with display.window_test().
-DRFW_Y_UNIT = 4            # gate lines per DRFW y step
-DRFW_Y_OFFSET = 0          # gate lines before RAM row 0
-DRFW_Y_MAX = 0xA9
-DRFW_FLIP_Y_LEFT = False   # left CoG scans gates the other way (STV_DIR)
-DRFW_FLIP_Y_RIGHT = False
+# update_partial() modes:
+#   PARTIAL_WINDOW = False: full-screen refresh with the red tables idle, so
+#     red pixels aren't driven and none of red's long groups run.
+#   PARTIAL_WINDOW = True (experimental): refresh only a box around the new
+#     pixels. Sets the RAM write window (DUW, 0x13) and the refresh window
+#     (DRFW, 0x90) to the same box on each CoG and uploads only that box.
+#     Setting DRFW alone showed RAM from the wrong rows. Check with
+#     tools/window_test.py.
+PARTIAL_WINDOW = False
+DRFW_Y_UNIT = 4            # gate lines per DRFW y step (full screen = 0..0xA9)
 PARTIAL_PAD_ROWS = 8       # extra rows around the new pixels
 PARTIAL_PAD_BYTES = 1      # extra 8 px columns around the new pixels
 BW_FAST_LUT = True         # frames with no red (incl. flash frames) use a
@@ -530,7 +531,8 @@ class EPaperDisplay:
                     box = getattr(self, "_test_box", None)
                     self._test_box = None
                     await self._partial(lut, black_left, red_left,
-                                        black_right, red_right, passes, box)
+                                        black_right, red_right, passes, box,
+                                        box is not None)
                 except Exception as ex:
                     import sys
                     print("EPD: partial update failed")
@@ -574,7 +576,7 @@ class EPaperDisplay:
                 self._display_updated.set()
 
     async def _partial(self, bitlut, black_left, red_left, black_right,
-                       red_right, passes, box=None):
+                       red_right, passes, box=None, use_window=False):
         """Refresh only a window around black pixels added since the last update."""
         if box is None:
             if self._partial_buf is None:
@@ -592,44 +594,40 @@ class EPaperDisplay:
             return
         if passes is None:
             passes = self.partial_passes
-        # Real image data everywhere; only the window gets driven
         _split_halves(self._framebuffer_black, black_left, black_right, bitlut)
         _split_halves(self._framebuffer_red, red_left, red_right, bitlut)
-        window = self._drfw_for_box(*box)
+        images = (black_left, red_left, black_right, red_right)
         t = time.ticks_ms()
-        print(f"EPD: partial rows {box[0]}-{box[1]} px {box[2] * 8}-{box[3] * 8 + 7}"
-              f" x{passes}, DRFW L={window[0]} R={window[1]}")
-        await self._run_frame((black_left, red_left, black_right, red_right), lut,
-                              max(1, int(passes)), window)
+        if PARTIAL_WINDOW or use_window:
+            window = self._window_for_box(*box)
+            print(f"EPD: partial window x{passes}: L={window[0]} R={window[1]}"
+                  " (bytes x0,x1, rows y0,y1)")
+            await self._run_frame(images, lut, max(1, int(passes)), window)
+        else:
+            print(f"EPD: partial (full screen, red idle) x{passes}")
+            await self._run_frame(images, lut, max(1, int(passes)))
         self.last_update_ms = time.ticks_diff(time.ticks_ms(), t)
         print(f"EPD: partial total {self.last_update_ms} ms")
 
-    def _drfw_for_box(self, r0, r1, c0, c1):
-        """(left, right) DRFW byte lists [x0, x1, y0, y1] for a frame box
-        (rows r0..r1, full-frame byte columns c0..c1). A half with nothing in
-        the box gets a 1-unit window in the white middle of the screen."""
-        r0 = max(0, r0 - PARTIAL_PAD_ROWS)
-        r1 = min(display_height - 1, r1 + PARTIAL_PAD_ROWS)
+    def _window_for_box(self, r0, r1, c0, c1):
+        """(left, right) windows [x0, x1, y0, y1] for a frame box (rows
+        r0..r1, full-frame byte columns c0..c1): x in bytes within the half,
+        y in rows aligned to DRFW_Y_UNIT. A half with nothing in the box gets
+        a one-unit window in the white middle of the screen."""
+        u = DRFW_Y_UNIT
+        r0 = max(0, r0 - PARTIAL_PAD_ROWS) // u * u
+        r1 = min(display_height, (r1 + PARTIAL_PAD_ROWS) // u * u + u) - 1
         c0 = max(0, c0 - PARTIAL_PAD_BYTES)
         c1 = min(display_width_bytes - 1, c1 + PARTIAL_PAD_BYTES)
-
-        def ywin(a, b, flip):
-            y0 = (a + DRFW_Y_OFFSET) // DRFW_Y_UNIT
-            y1 = (b + DRFW_Y_OFFSET) // DRFW_Y_UNIT
-            if flip:
-                y0, y1 = DRFW_Y_MAX - y1, DRFW_Y_MAX - y0
-            return max(0, min(DRFW_Y_MAX, y0)), max(0, min(DRFW_Y_MAX, y1))
-
         hw = display_half_width_bytes
         out = []
-        for half, flip in ((0, DRFW_FLIP_Y_LEFT), (1, DRFW_FLIP_Y_RIGHT)):
+        for half in (0, 1):
             lo, hi = half * hw, half * hw + hw - 1
             if c1 < lo or c0 > hi:
-                ya, yb = ywin(display_height // 2, display_height // 2, flip)
-                out.append([hw // 2, hw // 2, ya, yb])
+                m = display_height // 2 // u * u
+                out.append([hw // 2, hw // 2, m, m + u - 1])
             else:
-                ya, yb = ywin(r0, r1, flip)
-                out.append([max(c0, lo) - lo, min(c1, hi) - lo, ya, yb])
+                out.append([max(c0, lo) - lo, min(c1, hi) - lo, r0, r1])
         return out
 
     def _bw_short_lut(self):
@@ -670,7 +668,7 @@ class EPaperDisplay:
         bl, br, rl, rr = self._script_halves()
         lut = _REVERSE_LUT if self._reverse_fb_bits else _IDENTITY_LUT
         await self._partial(lut, bl, rl, br, rr, passes,
-                            (y, y + h - 1, x // 8, (x + w - 1) // 8))
+                            (y, y + h - 1, x // 8, (x + w - 1) // 8), True)
 
     def window_test(self, x=200, y=200, w=120, h=80, passes=None):
         """Calibrate partial windows: draws a black box and refreshes ONLY
@@ -760,11 +758,10 @@ class EPaperDisplay:
         """Reset, upload the image, init the CoG, load LUT, power up DC/DC."""
         await self._reset()
         t = time.ticks_ms()
-        await self._send_images(*images)
-        if window is not None:
-            # Refresh only this window on each CoG (default is full screen)
-            self._send_index_data_left(0x90, window[0])
-            self._send_index_data_right(0x90, window[1])
+        if window is None:
+            await self._send_images(*images)
+        else:
+            await self._send_window_images(images, window)
         t_upload = time.ticks_diff(time.ticks_ms(), t)
         t = time.ticks_ms()
         await self.cog_initial()
@@ -939,6 +936,32 @@ class EPaperDisplay:
         await self._send_big(R, L, 0x10, black_right)
         self._send_one(R, L, 0x12, ram_rw_data)
         await self._send_big(R, L, 0x11, red_right)
+
+    async def _send_window_images(self, images, window):
+        """Upload only a window per CoG: DUW (RAM write window) and DRFW
+        (refresh window) both set to it, then just that box's bytes."""
+        black_left, red_left, black_right, red_right = images
+        hw = display_half_width_bytes
+        for (cs, other), win, black, red in (
+                ((EPD_CS1_PIN, EPD_CS2_PIN), window[0], black_left, red_left),
+                ((EPD_CS2_PIN, EPD_CS1_PIN), window[1], black_right, red_right)):
+            x0, x1, y0, y1 = win
+            self._send_one(cs, other, 0x13, [x0, x1, y0 & 0xFF, y0 >> 8, y1 & 0xFF, y1 >> 8])
+            self._send_one(cs, other, 0x90, [x0, x1, y0 // DRFW_Y_UNIT, y1 // DRFW_Y_UNIT])
+            w = x1 - x0 + 1
+            bk = bytearray(w * (y1 - y0 + 1))
+            rd = bytearray(len(bk))
+            o = 0
+            for row in range(y0, y1 + 1):
+                a = row * hw + x0
+                bk[o:o + w] = black[a:a + w]
+                rd[o:o + w] = red[a:a + w]
+                o += w
+            ram_rw_data = [0x3B, 0x00, 0x14]
+            self._send_one(cs, other, 0x12, ram_rw_data)
+            await self._send_big(cs, other, 0x10, bk)
+            self._send_one(cs, other, 0x12, ram_rw_data)
+            await self._send_big(cs, other, 0x11, rd)
 
     async def _dcdc_soft_start(self):
         """DC-DC soft-start command
