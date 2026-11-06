@@ -4,7 +4,7 @@ import lvgl
 
 from apps.base_app import BaseApp
 from lib.button import MenuMinus, MenuPlus, UserA, UserB, Boot
-from lib.epd import display, display_height
+from lib.epd import display, display_height, display_width
 from lib.led_bar import leds
 import lib.json_configs as json_configs
 
@@ -28,6 +28,7 @@ _FONT = lvgl.font_montserrat_48
 _NAME_TOP = 221
 _NAME_BOTTOM = 557
 _NAME_DY = (_NAME_TOP + _NAME_BOTTOM) // 2 - display_height // 2
+_MAX_ZOOM = 640  # 256 = 1x; 640 = 2.5x
 
 
 class NametagApp(BaseApp):
@@ -72,6 +73,16 @@ class NametagApp(BaseApp):
             world.set_style_text_font(_FONT, 0)
 
             lvgl.screen_load(scr)
+            scr.update_layout()
+            # The largest built-in font is 48 px, so zoom the plate to fill
+            # the name band, up to _MAX_ZOOM and no wider than the panel.
+            w, h = plate.get_width(), plate.get_height()
+            zoom = min(_MAX_ZOOM,
+                       256 * (_NAME_BOTTOM - _NAME_TOP - 16) // max(h, 1),
+                       256 * (display_width - 64) // max(w, 1))
+            plate.set_style_transform_pivot_x(w // 2, 0)
+            plate.set_style_transform_pivot_y(h // 2, 0)
+            plate.set_style_transform_scale(zoom, 0)
             scr.update_layout()
             # screen_load dirties the whole panel. Keep the PNG everywhere else.
             display.lv_display.inv_p = 0
