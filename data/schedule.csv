@@ -1,0 +1,44 @@
+day,time,stage,talk,speaker,image
+Sat,10:00,Lamarr,The Hacker Mindset (KEYNOTE),Bruce Potter,keynote.png
+Sat,11:30,Lamarr,Blinkenlights That Remember: The Unsigned Firmware on your PC's RAM,Ames Evans,ames-evans.png
+Sat,11:30,Hopper,Designing Devices: Not Just PCBs in Boxes,Alley Cat,alley-cat.png
+Sat,13:00,Lamarr,Bad Apple in 65 Kilobytes,Charles Lohr and Evan Fletcher,charles-lohr-and-evan-fletcher.png
+Sat,13:00,Hopper,The Terminal That Rings You Back: Swedens Failed Pre-Internet,Johannes Wiig,johannes-wiig.png
+Sat,14:00,Lamarr,Rover Tracks: A Retrospective on the Open Source Rover,Adriel Bustamante,adriel-bustamante.png
+Sat,14:00,Hopper,Vibe-CADding a Wearable Speedometer for a Six Year Old,Eleanor Mazzarella,eleanor-mazzarella.png
+Sat,14:30,Lamarr,Alternative Controllers: Designing Unconventional Game Worlds,Estefannie and Justin,estefannie-and-justin-andarza.png
+Sat,14:30,Hopper,Achieving Quality Photoresist Uniformity on Asymmetric Substrates,Baird Bankovic,baird-bankovic.png
+Sat,15:30,Lamarr,Minus: Blocking Ads at the Pixel Level with an HDMI Man-in-the-Middle,Cyril Engmann,cyril-engmann.png
+Sat,16:00,Lamarr,How to Rob a Bank Without Really Trying,Andrew Denio and Danner Cronise,andrew-denio-and-danner-cronise.png
+Sat,16:00,Hopper,Building Things That Matter in the Age of AI,Sage Cadence,sage-cadence.png
+Sat,16:30,Hopper,Spinning E-textile Yarns,Lily Gabriel,lily-gabriel.png
+Sat,17:00,Lamarr,Secrets of Ghidra: Reverse Engineering Proprietary Smart Home Sensors,Stephen Farnsworth,stephen-farnsworth.png
+Sat,17:00,Hopper,Overengineering a CD Shelf,Addison Vogt,addison-vogt.png
+Sat,17:30,Lamarr,The Road to DOOM on an FPGA: Building a Soft-Logic Computer,Jim Scarletta,jim-scarletta.png
+Sat,18:00,Hopper,Prototyping the Future: Emerging Technologies,Todd Masilko,todd-masilko.png
+Sat,18:30,Lamarr,No Refresh Button: The Case For (and Against) Putting a Browser on Your Device,Ashleigh Pomerant,ashleigh-pomerant.png
+Sat,18:30,Hopper,The Perfect BLEnd: Reverse Engineering a Bluetooth Blender,Ryan Mast,ryan-mast.png
+Sun,13:00,Lamarr,A Builders Guide to Developing Integrated Photonics,Max Shirokawa,max-shirokawa.png
+Sun,13:00,Hopper,HM and I: Down the Rabbithole of Human Machine Interfacing,Joe Needleman and Dex,joe-needleman-and-dex.png
+Sun,14:00,Lamarr,When Faster Isnt Better: How Displays Cheat Time,Doug Goodwin,doug-goodwin.png
+Sun,14:00,Hopper,Finding a Loop: Creative Uses for e-Waste,Sarah Alvarez,sarah-alvarez.png
+Sun,14:30,Lamarr,Rare Circuits: How we Used and Abused a $1 MCU,Adam Batori and Kevin Colley,adam-batori-and-kevin-colley.png
+Sun,14:30,Hopper,The Hardware of Superconducting Quantum Computing,Kaveh Pezeshki,kaveh-pezeshki.png
+Sun,15:00,Hopper,LoRa and Beyond,Eric Hall,eric-hall.png
+Sun,15:30,Lamarr,How Many Neurons does It Take to Pump a Swing?,John Zhang,john-zhang.png
+Sun,15:30,Hopper,Bringing PCB Fabrication into the Makerspace,Henry Amador,henry-amador.png
+Sun,16:00,Lamarr,How to Make and Have Feelings,Kerry Scharfglass,kerry-scharfglass.png
+Sun,16:00,Hopper,StageReady: a Standalone Device for Vocal Pitch Correction,Sher Amir Dullat,sher-amir-dullat.png
+Sun,16:30,Lamarr,Designing Tiny ASIC GPUs,Pongsagon Vichitvejpaisal,pongsagon-vichitvejpaisal.png
+Sun,16:30,Hopper,EDA for Everyone: PCB Design in the Agentic Era,GC,dp.png
+Fri,13:00,HQ 2nd Floor,Tiny Tapeout (Part 1),Pat Deegan,pat-deegan-workshop.png
+Fri,15:00,HQ 2nd Floor,Tiny Tapeout (Part 2),Pat Deegan,pat-deegan-workshop.png
+Sat,11:30,Room A,Badge Hacking for Beginners,Nathan Jones,nathan-jones-workshop.png
+Sat,11:30,Room B,Explore the EMF Around You,Darcy Neal,darcy-neal-workshop.png
+Sat,14:00,Room A,Powered Flowers and Prismatic Stars,Debra Ansell,debra-ansell-workshop.png
+Sat,14:00,Room B,DigiKey Presents: Reinforcement Learning for Robotics,Shawn Hymel,shawn-hymel-workshop.png
+Sat,16:30,Room A,Exquisite Circuit: Exquisite Corpse for Electronics,Alessandra Noelting,alessandra-noelting-workshop.png
+Sat,16:30,Room B,Bling It On: Programming Your Own Generative Art Matrix,Estefannie De la Garza and Bob Hickman,bob-hickman-and-estefannie-workshop.png
+Sun,12:00,Room A,Making 3D Images (Lenticulars) and 3D Cameras,Josh Martin,josh-martin-workshop.png
+Sun,12:00,Room B,Arduino Presents: EchoGlow,Giovanni Salinas and Eduardo Contreras,giovanni-salinas-and-eduardo-contreras-workshop.png
+Sun,15:00,Room B,We Have TSCM at Home! (Learn to Build Your Own Wireless Bug Hunting Tools),Ayesha Wilson and Alex Lynd,ayesha-wilson-and-alex-lynd-workshop.png
