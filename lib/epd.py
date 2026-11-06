@@ -71,6 +71,17 @@ FLASH_BEFORE_FAST = True   # flash solid frames before each fast update
 FLASH_SEQUENCE = ("black", "white")   # any of "black", "white", "red"
 FLASH_PASSES = 1           # waveform passes per flash frame
 PARTIAL_PASSES = 2         # waveform passes for update_partial()
+# update_partial() refreshes only a window around the new pixels via the CoG's
+# DRFW register (0x90). Its y units/offset aren't documented; these come from
+# the full-screen value the driver uses (x 0..0x3B bytes, y 0..0xA9 = 680 gate
+# lines / 4). Check with display.window_test().
+DRFW_Y_UNIT = 4            # gate lines per DRFW y step
+DRFW_Y_OFFSET = 0          # gate lines before RAM row 0
+DRFW_Y_MAX = 0xA9
+DRFW_FLIP_Y_LEFT = False   # left CoG scans gates the other way (STV_DIR)
+DRFW_FLIP_Y_RIGHT = False
+PARTIAL_PAD_ROWS = 8       # extra rows around the new pixels
+PARTIAL_PAD_BYTES = 1      # extra 8 px columns around the new pixels
 BW_FAST_LUT = True         # frames with no red (incl. flash frames) use a
                            # shortened waveform: red's extra drive groups idled
 _SPI_CHUNK = const(4096)   # bytes per SPI write before yielding to asyncio
@@ -192,15 +203,17 @@ def _bw_lut_driver_b(base):
     return bytes(lut)
 
 
-def _ink_only_lut(lut, group_size, groups):
-    """Copy of a fast LUT where only table 1 (ink) drives. Tables 0 (paper),
-    2 (red) and 3 get level 0 = ground in every group, so white and red pixels
-    get no voltage and stay exactly as they are. The level byte is the first
-    byte of each group."""
+def _idle_tables_lut(lut, group_size, groups, tables):
+    """Copy of a fast LUT with whole tables replaced by idle rows (the LUT's
+    own last VCOM row: ground for one frame). Unlike zeroing one byte, this
+    doesn't depend on decoding the row format."""
     b = bytearray(lut)
-    for t in (0, 2, 3):
+    idle_at = (4 * groups + groups - 1) * group_size
+    idle = bytes(b[idle_at:idle_at + group_size])
+    for t in tables:
         for g in range(groups):
-            b[(t * groups + g) * group_size] = 0
+            o = (t * groups + g) * group_size
+            b[o:o + group_size] = idle
     return bytes(b)
 
 
@@ -222,6 +235,41 @@ def _delta_and_mark(cur, shown, out) -> int:
             s[i] = s[i] | d
         i += 1
     return found
+
+
+@micropython.viper
+def _bbox(buf, out) -> int:
+    """Bounding box of set bits in a 120-byte-wide frame.
+    out (bytearray(8)) <- row0, row1, byte_col0, byte_col1 as uint16.
+    Returns 1 if anything is set."""
+    b = ptr8(buf)
+    o = ptr16(out)
+    r0 = 9999
+    r1 = -1
+    c0 = 9999
+    c1 = -1
+    row = 0
+    while row < 672:
+        base = row * 120
+        c = 0
+        while c < 120:
+            if b[base + c]:
+                if row < r0:
+                    r0 = row
+                r1 = row
+                if c < c0:
+                    c0 = c
+                if c > c1:
+                    c1 = c
+            c += 1
+        row += 1
+    if r1 < 0:
+        return 0
+    o[0] = r0
+    o[1] = r1
+    o[2] = c0
+    o[3] = c1
+    return 1
 
 
 def _busy() -> bool:
@@ -468,7 +516,10 @@ class EPaperDisplay:
                 self._request_partial = False
                 passes = self._request_passes
                 try:
-                    await self._partial(lut, black_left, black_right, passes)
+                    box = getattr(self, "_test_box", None)
+                    self._test_box = None
+                    await self._partial(lut, black_left, red_left,
+                                        black_right, red_right, passes, box)
                 except Exception as ex:
                     import sys
                     print("EPD: partial update failed")
@@ -511,37 +562,91 @@ class EPaperDisplay:
             if not self._framebuffer_ready.is_set():
                 self._display_updated.set()
 
-    async def _partial(self, bitlut, black_left, black_right, passes):
-        if self._partial_buf is None:
-            self._partial_buf = bytearray(len(self._framebuffer_black))
-        if not _delta_and_mark(self._framebuffer_black, self._shown_black,
-                               self._partial_buf):
-            return  # nothing new to draw
-        ink = self._ink_lut()
-        if ink is None:
+    async def _partial(self, bitlut, black_left, red_left, black_right,
+                       red_right, passes, box=None):
+        """Refresh only a window around black pixels added since the last update."""
+        if box is None:
+            if self._partial_buf is None:
+                self._partial_buf = bytearray(len(self._framebuffer_black))
+            if not _delta_and_mark(self._framebuffer_black, self._shown_black,
+                                   self._partial_buf):
+                return  # nothing new to draw
+            bb = bytearray(8)
+            _bbox(self._partial_buf, bb)
+            box = (bb[0] | bb[1] << 8, bb[2] | bb[3] << 8,
+                   bb[4] | bb[5] << 8, bb[6] | bb[7] << 8)
+        lut = self._bw_short_lut()
+        if lut is None:
             print("EPD: no fast LUT, can't do a partial update")
             return
         if passes is None:
             passes = self.partial_passes
-        _split_halves(self._partial_buf, black_left, black_right, bitlut)
-        zeros = self._solid("white")[0]
+        # Real image data everywhere; only the window gets driven
+        _split_halves(self._framebuffer_black, black_left, black_right, bitlut)
+        _split_halves(self._framebuffer_red, red_left, red_right, bitlut)
+        window = self._drfw_for_box(*box)
         t = time.ticks_ms()
-        print(f"EPD: partial update x{passes}")
-        await self._run_frame((black_left, zeros, black_right, zeros), ink,
-                              max(1, int(passes)))
+        print(f"EPD: partial rows {box[0]}-{box[1]} px {box[2] * 8}-{box[3] * 8 + 7}"
+              f" x{passes}, DRFW L={window[0]} R={window[1]}")
+        await self._run_frame((black_left, red_left, black_right, red_right), lut,
+                              max(1, int(passes)), window)
         self.last_update_ms = time.ticks_diff(time.ticks_ms(), t)
         print(f"EPD: partial total {self.last_update_ms} ms")
 
-    def _ink_lut(self):
+    def _drfw_for_box(self, r0, r1, c0, c1):
+        """(left, right) DRFW byte lists [x0, x1, y0, y1] for a frame box
+        (rows r0..r1, full-frame byte columns c0..c1). A half with nothing in
+        the box gets a 1-unit window in the white middle of the screen."""
+        r0 = max(0, r0 - PARTIAL_PAD_ROWS)
+        r1 = min(display_height - 1, r1 + PARTIAL_PAD_ROWS)
+        c0 = max(0, c0 - PARTIAL_PAD_BYTES)
+        c1 = min(display_width_bytes - 1, c1 + PARTIAL_PAD_BYTES)
+
+        def ywin(a, b, flip):
+            y0 = (a + DRFW_Y_OFFSET) // DRFW_Y_UNIT
+            y1 = (b + DRFW_Y_OFFSET) // DRFW_Y_UNIT
+            if flip:
+                y0, y1 = DRFW_Y_MAX - y1, DRFW_Y_MAX - y0
+            return max(0, min(DRFW_Y_MAX, y0)), max(0, min(DRFW_Y_MAX, y1))
+
+        hw = display_half_width_bytes
+        out = []
+        for half, flip in ((0, DRFW_FLIP_Y_LEFT), (1, DRFW_FLIP_Y_RIGHT)):
+            lo, hi = half * hw, half * hw + hw - 1
+            if c1 < lo or c0 > hi:
+                ya, yb = ywin(display_height // 2, display_height // 2, flip)
+                out.append([hw // 2, hw // 2, ya, yb])
+            else:
+                ya, yb = ywin(r0, r1, flip)
+                out.append([max(c0, lo) - lo, min(c1, hi) - lo, ya, yb])
+        return out
+
+    def _bw_short_lut(self):
+        """Fast LUT with the red tables (2, 3) idle. For windows with no red
+        pixels: black/white drive unchanged, none of red's long groups."""
         self._fast_lut(False)  # make sure the tables are loaded
         if not self._luts:
             return None
-        if "ink" not in self._luts:
+        if "bw_short" not in self._luts:
             if self._cog_driver == "B":
-                self._luts["ink"] = _ink_only_lut(self._luts["bw"], 8, 10)
+                self._luts["bw_short"] = _idle_tables_lut(self._luts["base"], 8, 10, (2, 3))
             else:
-                self._luts["ink"] = _ink_only_lut(self._luts["nored"], 4, 9)
-        return self._luts["ink"]
+                self._luts["bw_short"] = _idle_tables_lut(self._luts["nored"], 4, 9, (2, 3))
+        return self._luts["bw_short"]
+
+    def window_test(self, x=200, y=200, w=120, h=80, passes=None):
+        """Calibrate partial windows: draws a black box and refreshes ONLY
+        that box. Watch the panel: the box should appear, nothing else
+        should flash. Try one in each half, e.g. window_test(200, 200) and
+        window_test(650, 400)."""
+        self.black.fill_rect(x, y, w, h, 1)
+        self.red.fill_rect(x, y, w, h, 0)
+        self._shown_black[:] = self._framebuffer_black
+        self._test_box = (y, y + h - 1, x // 8, (x + w - 1) // 8)
+        self._request_partial = True
+        self._request_passes = passes
+        self._display_updated.clear()
+        self._framebuffer_ready.set()
 
     async def global_update(self, black_left, red_left, black_right, red_right,
                             fast=False, has_red=True, flash=False,
@@ -582,17 +687,17 @@ class EPaperDisplay:
             return self._solid_00, self._solid_ff
         return self._solid_00, self._solid_00  # white
 
-    async def _run_frame(self, images, lut, passes):
+    async def _run_frame(self, images, lut, passes, window=None):
         """Upload one frame and run the waveform `passes` times."""
         if passes > 1 and self._repeat_refresh_ok is False:
             # This CoG ignores back-to-back refreshes: redo everything per pass
             for p in range(passes):
-                await self._prepare(images, lut)
+                await self._prepare(images, lut, window)
                 dt = await self._refresh_once()
                 await self._dcdc_soft_shutdown()
                 print(f"EPD: pass {p + 1}/{passes} (full cycle) {dt} ms")
         else:
-            await self._prepare(images, lut)
+            await self._prepare(images, lut, window)
             p = 0
             while p < passes:
                 dt = await self._refresh_once()
@@ -604,7 +709,7 @@ class EPaperDisplay:
                     if not self._repeat_refresh_ok:
                         await self._dcdc_soft_shutdown()
                         for q in range(p, passes):
-                            await self._prepare(images, lut)
+                            await self._prepare(images, lut, window)
                             dt = await self._refresh_once()
                             await self._dcdc_soft_shutdown()
                             print(f"EPD: pass {q + 1}/{passes} (full cycle) {dt} ms")
@@ -613,11 +718,15 @@ class EPaperDisplay:
             else:
                 await self._dcdc_soft_shutdown()
 
-    async def _prepare(self, images, lut):
+    async def _prepare(self, images, lut, window=None):
         """Reset, upload the image, init the CoG, load LUT, power up DC/DC."""
         await self._reset()
         t = time.ticks_ms()
         await self._send_images(*images)
+        if window is not None:
+            # Refresh only this window on each CoG (default is full screen)
+            self._send_index_data_left(0x90, window[0])
+            self._send_index_data_right(0x90, window[1])
         t_upload = time.ticks_diff(time.ticks_ms(), t)
         t = time.ticks_ms()
         await self.cog_initial()

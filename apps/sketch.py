@@ -13,8 +13,9 @@ Shake to erase: an MPU6050 on the SAO I2C bus (0x68 / 0x69). It takes
 SHAKE_PEAKS hard jolts (> SHAKE_G) within SHAKE_WINDOW_MS, so bumps don't
 wipe the drawing.
 
-While drawing, the panel uses display.update_partial(): only newly drawn
-black pixels are driven, so the red frame and white screen never flash.
+While drawing, the panel uses display.update_partial(): only a window around
+the newly drawn pixels is refreshed, with a black/white-only waveform, so the
+red frame isn't touched.
 
 Buttons:
   User A  - erase (redraw the blank frame with a cleaning flash)
@@ -44,13 +45,13 @@ from lib.button import UserA, UserB
 from lib.epd import display
 from lib.led_bar import leds
 
-FRAME_PNG = "/data/graphics/sketch_frame.png"
+FRAME_PNG = "/data/gallery/EtchASketch.png"   # 960x670, palette PNG
 
 LINE_W = 3              # trace thickness in pixels
-# White screen in sketch_frame.png is x 70..890, y 58..532 with 18 px rounded
-# corners. Keep the whole line inside it, clear of the corners.
-_INSET = 12 + LINE_W
-X_MIN, Y_MIN, X_MAX, Y_MAX = 70 + _INSET, 58 + _INSET, 890 - _INSET, 532 - _INSET
+# Largest all-white box in EtchASketch.png's screen (clear of the rounded
+# corners) is x 132..826, y 121..524. Keep the whole 3 px line inside it.
+_HALF = LINE_W // 2
+X_MIN, Y_MIN, X_MAX, Y_MAX = 132 + _HALF + 1, 121 + _HALF + 1, 826 - _HALF - 1, 524 - _HALF - 1
 
 # SAO GPIO1 pins (from lib/sao.py), probed in this order
 CANDIDATE_PINS = ((2, "SAO1"), (4, "SAO2"), (7, "SAO3"))
@@ -307,12 +308,13 @@ class SketchApp(BaseApp):
         """Draw the empty frame and push it with a cleaning flash."""
         leds.fill("cyan")
         display.clear()
+        display.red.fill_rect(0, 668, 960, 4, 1)   # image is 2 rows short
         display.draw_png(FRAME_PNG)
         msg = self._status_text()
         if msg:
             # White text on the red frame, under the screen
-            big_text(display.red, msg, 200, 552, 0)
-            big_text(display.black, msg, 200, 552, 0)
+            big_text(display.red, msg, 200, 560, 0)
+            big_text(display.black, msg, 200, 560, 0)
         self._pen_dot()
         display.update(fast=True, flash=flash)
         self._dirty = False
