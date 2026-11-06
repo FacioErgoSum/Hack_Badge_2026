@@ -411,15 +411,45 @@ class EPaperDisplay:
                 self._display_updated.set()
 
     async def global_update(self, black_left, red_left, black_right, red_right,
-                            fast=False, has_red=True):
+                            fast=False, has_red=True, flash=False):
         t_start = time.ticks_ms()
         lut = self._fast_lut(has_red) if fast else None
         if fast and lut is None:
             fast = False
         passes = max(1, int(self.fast_passes)) if fast else 1
         print(f"EPD: {'fast x%d' % passes if fast else 'full'} update")
-        images = (black_left, red_left, black_right, red_right)
 
+        if fast and flash and self.flash_sequence:
+            # Flash solid frames to wipe the old image. Driver 8 needs the red
+            # table if any flash frame is red.
+            flash_lut = lut
+            if self._cog_driver == "8" and "red" in self.flash_sequence:
+                flash_lut = self._fast_lut(True)
+            for color in self.flash_sequence:
+                bk, rd = self._solid(color)
+                t = time.ticks_ms()
+                await self._run_frame((bk, rd, bk, rd), flash_lut,
+                                      max(1, int(self.flash_passes)))
+                print(f"EPD: flash {color} {time.ticks_diff(time.ticks_ms(), t)} ms")
+
+        await self._run_frame((black_left, red_left, black_right, red_right), lut, passes)
+
+        self.last_update_ms = time.ticks_diff(time.ticks_ms(), t_start)
+        print(f"EPD: total {self.last_update_ms} ms")
+
+    def _solid(self, color):
+        """(black_plane, red_plane) half-frame buffers for a solid color."""
+        if self._solid_00 is None:
+            self._solid_00 = bytes(half_frame_one_color_size)
+            self._solid_ff = b"\xff" * half_frame_one_color_size
+        if color == "black":
+            return self._solid_ff, self._solid_00
+        if color == "red":
+            return self._solid_00, self._solid_ff
+        return self._solid_00, self._solid_00  # white
+
+    async def _run_frame(self, images, lut, passes):
+        """Upload one frame and run the waveform `passes` times."""
         if passes > 1 and self._repeat_refresh_ok is False:
             # This CoG ignores back-to-back refreshes: redo everything per pass
             for p in range(passes):
@@ -448,9 +478,6 @@ class EPaperDisplay:
                 p += 1
             else:
                 await self._dcdc_soft_shutdown()
-
-        self.last_update_ms = time.ticks_diff(time.ticks_ms(), t_start)
-        print(f"EPD: total {self.last_update_ms} ms")
 
     async def _prepare(self, images, lut):
         """Reset, upload the image, init the CoG, load LUT, power up DC/DC."""
