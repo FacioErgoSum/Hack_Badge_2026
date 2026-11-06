@@ -70,6 +70,8 @@ FAST_PASSES = 3            # run the fast waveform this many times per update
 FLASH_BEFORE_FAST = True   # flash solid frames before each fast update
 FLASH_SEQUENCE = ("black", "white")   # any of "black", "white", "red"
 FLASH_PASSES = 1           # waveform passes per flash frame
+BW_FAST_LUT = True         # frames with no red (incl. flash frames) use a
+                           # shortened waveform: red's extra drive groups idled
 _SPI_CHUNK = const(4096)   # bytes per SPI write before yielding to asyncio
 _BUSY_POLL_MS = const(10)
 
@@ -177,6 +179,18 @@ def _rgb565_to_planes(src, stride: int, w: int, h: int, x1: int, y1: int, black,
         row += 1
 
 
+def _bw_lut_driver_b(base):
+    """Driver B table with red (table 2) idled after group 4, like the
+    black/white tables. 5 tables x 10 groups x 8 bytes. For frames with no red
+    pixels table 2 drives nothing, but its 9 drive groups stretch the waveform."""
+    lut = bytearray(base)
+    idle = bytes([0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01])
+    for g in range(5, 10):
+        o = 2 * 80 + g * 8
+        lut[o:o + 8] = idle
+    return bytes(lut)
+
+
 def _busy() -> bool:
     """True while either CoG is busy (BUSY is active low)."""
     return not EPD_BUSY1_PIN.value() or not EPD_BUSY2_PIN.value()
@@ -245,6 +259,9 @@ class EPaperDisplay:
         self.flash_sequence = FLASH_SEQUENCE
         self.flash_passes = FLASH_PASSES
         self._request_flash = None
+        self._request_passes = None
+        self._request_bw = None
+        self._request_auto_full = True
         self._solid_ff = None  # lazily allocated all-ones half plane
         self._solid_00 = None  # lazily allocated all-zeros half plane
         # None = unknown, True/False = whether the CoG accepts a second 0x15
@@ -315,7 +332,7 @@ class EPaperDisplay:
                               self._framebuffer_black, self._framebuffer_red)
         disp.flush_ready()
 
-    def update(self, fast=None, flash=None):
+    def update(self, fast=None, flash=None, passes=None, bw=None, auto_full=True):
         """Done drawing: push the framebuffers to the panel.
 
         fast=None  -> use display.fast_by_default
@@ -328,9 +345,17 @@ class EPaperDisplay:
         flash=None  -> use display.flash_before_fast (fast updates only)
         flash=True  -> flash display.flash_sequence (black, white) first
         flash=False -> no flash
+
+        passes=N    -> override display.fast_passes for this update
+        bw=True     -> use the short black/white waveform even if the frame has
+                       red (red pixels get less drive; good for quick redraws)
+        auto_full=False -> don't count toward / trigger the periodic full refresh
         """
         self._request_fast = self.fast_by_default if fast is None else bool(fast)
         self._request_flash = flash
+        self._request_passes = passes
+        self._request_bw = bw
+        self._request_auto_full = auto_full
         self._display_updated.clear()
         self._framebuffer_ready.set()
 
@@ -389,7 +414,10 @@ class EPaperDisplay:
             flash = self._request_flash
             if flash is None:
                 flash = self.flash_before_fast
-            if fast and self._fast_count >= self.full_refresh_every:
+            passes = self._request_passes
+            bw = self._request_bw
+            auto_full = self._request_auto_full
+            if fast and auto_full and self._fast_count >= self.full_refresh_every:
                 print("EPD: periodic full refresh to clear ghosting")
                 fast = False
 
@@ -399,33 +427,38 @@ class EPaperDisplay:
 
             try:
                 await self.global_update(black_left, red_left, black_right, red_right,
-                                         fast=fast, has_red=has_red, flash=flash)
+                                         fast=fast, has_red=has_red, flash=flash,
+                                         passes=passes, bw=bw)
             except Exception as ex:
                 import sys
                 print("EPD: update failed")
                 sys.print_exception(ex)
 
-            self._fast_count = self._fast_count + 1 if fast else 0
+            if not fast:
+                self._fast_count = 0
+            elif auto_full:
+                self._fast_count += 1
             gc.collect()
             if not self._framebuffer_ready.is_set():
                 self._display_updated.set()
 
     async def global_update(self, black_left, red_left, black_right, red_right,
-                            fast=False, has_red=True, flash=False):
+                            fast=False, has_red=True, flash=False,
+                            passes=None, bw=False):
         t_start = time.ticks_ms()
-        lut = self._fast_lut(has_red) if fast else None
+        lut = self._fast_lut(has_red and not bw) if fast else None
         if fast and lut is None:
             fast = False
-        passes = max(1, int(self.fast_passes)) if fast else 1
+        if passes is None:
+            passes = self.fast_passes
+        passes = max(1, int(passes)) if fast else 1
         print(f"EPD: {'fast x%d' % passes if fast else 'full'} update")
 
         if fast and flash and self.flash_sequence:
-            # Flash solid frames to wipe the old image. Driver 8 needs the red
-            # table if any flash frame is red.
-            flash_lut = lut
-            if self._cog_driver == "8" and "red" in self.flash_sequence:
-                flash_lut = self._fast_lut(True)
+            # Flash solid frames to wipe the old image. Black/white frames use
+            # the short black/white waveform.
             for color in self.flash_sequence:
+                flash_lut = self._fast_lut(color == "red")
                 bk, rd = self._solid(color)
                 t = time.ticks_ms()
                 await self._run_frame((bk, rd, bk, rd), flash_lut,
@@ -504,7 +537,8 @@ class EPaperDisplay:
             try:
                 import data.rendered_luts as L
                 if self._cog_driver == "B":
-                    self._luts = {"base": bytes(L.lutb_base)}
+                    self._luts = {"base": bytes(L.lutb_base),
+                                  "bw": _bw_lut_driver_b(L.lutb_base)}
                 else:
                     self._luts = {
                         "red": bytes(L.lut8_red_clear),
@@ -518,6 +552,8 @@ class EPaperDisplay:
         if not self._luts:
             return None
         if self._cog_driver == "B":
+            if not has_red and BW_FAST_LUT:
+                return self._luts["bw"]
             return self._luts["base"]
         return self._luts["red" if has_red else "nored"]
 
