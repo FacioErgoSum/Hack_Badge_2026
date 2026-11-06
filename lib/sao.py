@@ -1,6 +1,6 @@
 """SAO Helper Interface for Billboard Badge"""
 
-# https://docs.micropython.org/en/v1.27.0/library/machine.I2CTarget.html
+# https://docs.micropython.org/en/v1.24.0/library/machine.I2C.html
 
 import asyncio as aio
 
@@ -27,15 +27,12 @@ class Sao:
         self.gpio2 = machine.Pin(gpio2)
 
         self.address: int|None = None
-        self.target = None
 
     def set_address(self, addr: int):
-        self.address = 0
-        self.target = machine.I2CTarget(
-            id=SAO_I2C_BUS, addr=self.address, scl=SAO_I2C_SCL, sda=SAO_I2C_SDA
-        )
+        """Set the I2C address of the device on this SAO port."""
+        self.address = addr
 
-    def readfrom(self, nbytes, stop=True, /):
+    def readfrom(self, nbytes, stop=True):
         if self.address is None:
             raise ValueError("No address set, unable to read from target")
         return i2c.readfrom(self.address, nbytes, stop)

@@ -45,7 +45,7 @@ async def main():
     if configs['load_counter'] == 42:
         leds.fill((1,1,0))
         display.clear()
-        display.draw_png(f"/data/graphics/never-epd.png")
+        display.draw_png(f"/data/graphics/never_epd.png")
         display.update()
         leds.fill((0,1,0))
 
