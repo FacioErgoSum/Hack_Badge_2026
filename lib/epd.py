@@ -65,6 +65,8 @@ USE_HW_SPI = True          # False = old bit-banged SoftSPI
 SPI_BAUD = 8_000_000       # PDi reference driver uses 8 MHz
 FAST_BY_DEFAULT = True     # display.update() uses the short waveform
 FULL_REFRESH_EVERY = 10    # after this many fast updates, do one full refresh
+FAST_PASSES = 3            # run the fast waveform this many times per update
+                           # (1 pass leaves ghosting / washed-out red)
 _SPI_CHUNK = const(4096)   # bytes per SPI write before yielding to asyncio
 _BUSY_POLL_MS = const(10)
 
@@ -235,6 +237,10 @@ class EPaperDisplay:
         # Update settings
         self.fast_by_default = FAST_BY_DEFAULT
         self.full_refresh_every = FULL_REFRESH_EVERY
+        self.fast_passes = FAST_PASSES
+        # None = unknown, True/False = whether the CoG accepts a second 0x15
+        # refresh without a full re-init. Learned on the first multi-pass update.
+        self._repeat_refresh_ok = None
         self._fast_count = 0
         self._request_fast = FAST_BY_DEFAULT
         self._luts = None  # loaded lazily
