@@ -6,6 +6,18 @@ from apps.base_app import BaseApp
 from lib.button import MenuMinus, MenuPlus, UserA, UserB, Boot
 from lib.epd import display, display_height
 from lib.led_bar import leds
+import lib.json_configs as json_configs
+
+
+def _name_lines():
+    """The wearer's name from "name" in data/panel_config.json, split into
+    two lines at the first space, e.g. {"name": "Ada Lovelace"}."""
+    try:
+        name = json_configs.load().get("name", "")
+    except (OSError, ValueError):
+        name = ""
+    first, _, rest = name.strip().partition(" ")
+    return first, rest
 
 
 _WHITE = lvgl.color_hex(0xFFFFFF)
@@ -49,12 +61,13 @@ class NametagApp(BaseApp):
             plate.set_style_pad_all(8, 0)
 
             hello = lvgl.label(plate)
-            hello.set_text("")
+            first, rest = _name_lines()
+            hello.set_text(first)
             hello.set_style_text_color(_BLACK, 0)
             hello.set_style_text_font(_FONT, 0)
 
             world = lvgl.label(plate)
-            world.set_text("")
+            world.set_text(rest)
             world.set_style_text_color(_BLACK, 0)
             world.set_style_text_font(_FONT, 0)
 
