@@ -74,11 +74,14 @@ class AppSwitcher:
 
 
     async def arun(self):
+        shown_idx = None  # what the LEDs currently show; redraw only on change
         while True:
             if self.selecting_mode:
-               
+
                 ## Display current app from all installed apps
-                leds.menu_display(self.selection_idx, len(self.apps))
+                if shown_idx != self.selection_idx:
+                    leds.menu_display(self.selection_idx, len(self.apps))
+                    shown_idx = self.selection_idx
 
                 if MenuPlus.pressed():
                     self.selection_idx = (self.selection_idx + 1) % len(self.apps)
@@ -94,10 +97,10 @@ class AppSwitcher:
                     print(f"Switching to {self.apps[self.selection_idx].name}")
                     self.active_idx = self.selection_idx
                     self.apps[self.active_idx].launched = True
-                    leds.clear_sequence()
-                    leds.fill((0, 0, 0))
-                    leds.write()
+                    leds.clear_sequence()  # also un-pauses, so apps can animate
+                    leds.off()
                     self.selecting_mode = False
+                    shown_idx = None
                 await aio.sleep_ms(10)
             else:
                 if MenuMinus.pressed() or MenuPlus.pressed():

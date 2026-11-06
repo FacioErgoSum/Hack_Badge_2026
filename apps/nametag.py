@@ -26,7 +26,7 @@ class NametagApp(BaseApp):
 
     def run(self):
         if self.launched:
-            leds.fill((0,1,1))
+            leds.fill("cyan")
             display.draw_png("/data/graphics/hello_i_am_blank.png")
 
             scr = lvgl.obj()
@@ -65,5 +65,5 @@ class NametagApp(BaseApp):
             plate.invalidate()
             lvgl.refr_now(display.lv_display)
             display.update()
-            leds.fill((0,1,0))
+            leds.fill("green")
 

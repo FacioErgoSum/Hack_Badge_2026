@@ -399,7 +399,7 @@ class ScheduleApp(BaseApp):
         return layout_day(talks, day=self.day)
 
     def _draw(self):
-        leds.fill((0,1,1))
+        leds.fill("cyan")
         talks = self._load()
         if not self._built:
             self._build(talks)
@@ -414,7 +414,7 @@ class ScheduleApp(BaseApp):
         for path, col, row, _img_w, _img_h in sorted(self._images, key=lambda item: -item[2]):
             display.draw_png(path, row, col)
         display.update()
-        leds.fill((0,1,0))
+        leds.fill("green")
 
     def _build(self, talks):
         placed = self._layout(talks)

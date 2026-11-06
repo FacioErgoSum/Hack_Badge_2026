@@ -37,17 +37,17 @@ async def main():
     if configs['load_counter'] < 2: 
         ## Out of the box config.  Check out the counter in data/panel_config.json
         ## do splashscreen
-        leds.fill((0,1,1))
+        leds.fill("cyan")
         display.clear()
         display.draw_png(f"/data/graphics/supercon-x-splash.png")
         display.update()
-        leds.fill((0,1,0))
+        leds.fill("green")
     if configs['load_counter'] == 42:
-        leds.fill((1,1,0))
+        leds.fill("yellow")
         display.clear()
-        display.draw_png(f"/data/graphics/never-epd.png")
+        display.draw_png(f"/data/graphics/never_epd.png")
         display.update()
-        leds.fill((0,1,0))
+        leds.fill("green")
 
     print("Initializing main...")
 
