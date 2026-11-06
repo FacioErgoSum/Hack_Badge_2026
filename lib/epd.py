@@ -70,6 +70,7 @@ FAST_PASSES = 3            # run the fast waveform this many times per update
 FLASH_BEFORE_FAST = True   # flash solid frames before each fast update
 FLASH_SEQUENCE = ("black", "white")   # any of "black", "white", "red"
 FLASH_PASSES = 1           # waveform passes per flash frame
+PARTIAL_PASSES = 2         # waveform passes for update_partial()
 BW_FAST_LUT = True         # frames with no red (incl. flash frames) use a
                            # shortened waveform: red's extra drive groups idled
 _SPI_CHUNK = const(4096)   # bytes per SPI write before yielding to asyncio
@@ -191,6 +192,38 @@ def _bw_lut_driver_b(base):
     return bytes(lut)
 
 
+def _ink_only_lut(lut, group_size, groups):
+    """Copy of a fast LUT where only table 1 (ink) drives. Tables 0 (paper),
+    2 (red) and 3 get level 0 = ground in every group, so white and red pixels
+    get no voltage and stay exactly as they are. The level byte is the first
+    byte of each group."""
+    b = bytearray(lut)
+    for t in (0, 2, 3):
+        for g in range(groups):
+            b[(t * groups + g) * group_size] = 0
+    return bytes(b)
+
+
+@micropython.viper
+def _delta_and_mark(cur, shown, out) -> int:
+    """out = black pixels in `cur` that aren't in `shown`; adds them to
+    `shown`. Returns 1 if any pixel is new."""
+    c = ptr8(cur)
+    s = ptr8(shown)
+    o = ptr8(out)
+    n = int(len(cur))
+    found = 0
+    i = 0
+    while i < n:
+        d = c[i] & (s[i] ^ 0xFF)
+        o[i] = d
+        if d:
+            found = 1
+            s[i] = s[i] | d
+        i += 1
+    return found
+
+
 def _busy() -> bool:
     """True while either CoG is busy (BUSY is active low)."""
     return not EPD_BUSY1_PIN.value() or not EPD_BUSY2_PIN.value()
@@ -264,6 +297,9 @@ class EPaperDisplay:
         self._request_auto_full = True
         self._solid_ff = None  # lazily allocated all-ones half plane
         self._solid_00 = None  # lazily allocated all-zeros half plane
+        self.partial_passes = PARTIAL_PASSES
+        self._request_partial = False
+        self._partial_buf = None
         # None = unknown, True/False = whether the CoG accepts a second 0x15
         # refresh without a full re-init. Learned on the first multi-pass update.
         self._repeat_refresh_ok = None
@@ -283,6 +319,8 @@ class EPaperDisplay:
         """
         self._framebuffer_black = bytearray(half_frame_one_color_size * 2)
         self._framebuffer_red = bytearray(half_frame_one_color_size * 2)
+        # Black pixels currently on the panel, for update_partial()
+        self._shown_black = bytearray(half_frame_one_color_size * 2)
         # Framebuffers that can be drawn to directly
         self.black = framebuf.FrameBuffer(
             self._framebuffer_black, display_width, display_height, framebuf.MONO_HLSB
@@ -352,10 +390,25 @@ class EPaperDisplay:
         auto_full=False -> don't count toward / trigger the periodic full refresh
         """
         self._request_fast = self.fast_by_default if fast is None else bool(fast)
+        self._request_partial = False
         self._request_flash = flash
         self._request_passes = passes
         self._request_bw = bw
         self._request_auto_full = auto_full
+        self._display_updated.clear()
+        self._framebuffer_ready.set()
+
+    def update_partial(self, passes=None):
+        """Draw only black pixels added since the last update.
+
+        White and red pixels (and black ones already showing) get no drive,
+        so nothing else on the panel changes or flashes. It can only ADD
+        black: erasing needs a normal update(). Meant for drawing apps.
+        """
+        if self._framebuffer_ready.is_set() and not self._request_partial:
+            return  # a full update is already queued and will cover this
+        self._request_partial = True
+        self._request_passes = passes
         self._display_updated.clear()
         self._framebuffer_ready.set()
 
@@ -410,6 +463,21 @@ class EPaperDisplay:
             # Clear *before* copying, so an update() requested during the
             # refresh below triggers another refresh instead of being dropped.
             self._framebuffer_ready.clear()
+
+            if self._request_partial:
+                self._request_partial = False
+                passes = self._request_passes
+                try:
+                    await self._partial(lut, black_left, black_right, passes)
+                except Exception as ex:
+                    import sys
+                    print("EPD: partial update failed")
+                    sys.print_exception(ex)
+                gc.collect()
+                if not self._framebuffer_ready.is_set():
+                    self._display_updated.set()
+                continue
+
             fast = self._request_fast
             flash = self._request_flash
             if flash is None:
@@ -424,6 +492,7 @@ class EPaperDisplay:
             _split_halves(self._framebuffer_black, black_left, black_right, lut)
             _split_halves(self._framebuffer_red, red_left, red_right, lut)
             has_red = _any_set(self._framebuffer_red)
+            self._shown_black[:] = self._framebuffer_black
 
             try:
                 await self.global_update(black_left, red_left, black_right, red_right,
@@ -441,6 +510,38 @@ class EPaperDisplay:
             gc.collect()
             if not self._framebuffer_ready.is_set():
                 self._display_updated.set()
+
+    async def _partial(self, bitlut, black_left, black_right, passes):
+        if self._partial_buf is None:
+            self._partial_buf = bytearray(len(self._framebuffer_black))
+        if not _delta_and_mark(self._framebuffer_black, self._shown_black,
+                               self._partial_buf):
+            return  # nothing new to draw
+        ink = self._ink_lut()
+        if ink is None:
+            print("EPD: no fast LUT, can't do a partial update")
+            return
+        if passes is None:
+            passes = self.partial_passes
+        _split_halves(self._partial_buf, black_left, black_right, bitlut)
+        zeros = self._solid("white")[0]
+        t = time.ticks_ms()
+        print(f"EPD: partial update x{passes}")
+        await self._run_frame((black_left, zeros, black_right, zeros), ink,
+                              max(1, int(passes)))
+        self.last_update_ms = time.ticks_diff(time.ticks_ms(), t)
+        print(f"EPD: partial total {self.last_update_ms} ms")
+
+    def _ink_lut(self):
+        self._fast_lut(False)  # make sure the tables are loaded
+        if not self._luts:
+            return None
+        if "ink" not in self._luts:
+            if self._cog_driver == "B":
+                self._luts["ink"] = _ink_only_lut(self._luts["bw"], 8, 10)
+            else:
+                self._luts["ink"] = _ink_only_lut(self._luts["nored"], 4, 9)
+        return self._luts["ink"]
 
     async def global_update(self, black_left, red_left, black_right, red_right,
                             fast=False, has_red=True, flash=False,

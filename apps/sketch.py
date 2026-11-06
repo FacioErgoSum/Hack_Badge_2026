@@ -9,6 +9,13 @@ LEDs: 0-3 animate the X knob, 4-7 the Y knob while turning (a dot spins the
 way you turn; that side flashes red when the pen hits a wall). When idle they
 show status: green = up to date, yellow = waiting to redraw, cyan = panel busy.
 
+Shake to erase: an MPU6050 on the SAO I2C bus (0x68 / 0x69). It takes
+SHAKE_PEAKS hard jolts (> SHAKE_G) within SHAKE_WINDOW_MS, so bumps don't
+wipe the drawing.
+
+While drawing, the panel uses display.update_partial(): only newly drawn
+black pixels are driven, so the red frame and white screen never flash.
+
 Buttons:
   User A  - erase (redraw the blank frame with a cleaning flash)
   User B  - two knobs: re-run the cleaning flash on the current drawing
@@ -65,6 +72,11 @@ LED_DOT_STEPS = 16      # dot steps per knob revolution
 X_COLOR = "cyan"
 Y_COLOR = "magenta"
 WALL_COLOR = "red"
+
+SHAKE_G = 2.2           # a jolt is a reading this far from 1 g (in g)
+SHAKE_PEAKS = 4         # this many jolts...
+SHAKE_WINDOW_MS = 1200  # ...within this long = erase
+SHAKE_COOLDOWN_MS = 3000
 
 AS5600_ADDR = 0x36
 _VDD_UV = 3_300_000
@@ -174,6 +186,69 @@ def find_knobs():
     return knobs
 
 
+class Shake:
+    """MPU6050 shake detector on the SAO I2C bus."""
+
+    def __init__(self):
+        self.i2c = None
+        self.addr = None
+        self._peaks = []
+        self._in_peak = False
+        self._cooldown_until = 0
+        try:
+            from lib.sao import i2c
+            found = i2c.scan()
+            for a in (0x68, 0x69):
+                if a in found and i2c.readfrom_mem(a, 0x75, 1)[0] in (0x68, 0x70, 0x71, 0x72, 0x73, 0x98):
+                    self.i2c, self.addr = i2c, a
+                    break
+            if self.addr is None:
+                print("Sketch: no MPU6050 found, shake-to-erase off (I2C: "
+                      f"{[hex(a) for a in found]})")
+                return
+            i2c.writeto_mem(self.addr, 0x6B, b"\x00")   # wake up
+            i2c.writeto_mem(self.addr, 0x1C, b"\x10")   # accel +-8 g
+            i2c.writeto_mem(self.addr, 0x1A, b"\x03")   # DLPF ~44 Hz
+            print(f"Sketch: MPU6050 at 0x{self.addr:02X}, shake to erase")
+        except Exception as ex:
+            print(f"Sketch: MPU6050 setup failed: {ex}")
+            self.addr = None
+
+    def accel_g(self):
+        d = self.i2c.readfrom_mem(self.addr, 0x3B, 6)
+        vals = []
+        for i in (0, 2, 4):
+            v = (d[i] << 8) | d[i + 1]
+            if v & 0x8000:
+                v -= 0x10000
+            vals.append(v / 4096)   # 4096 LSB/g at +-8 g
+        return vals
+
+    def poll(self):
+        """Returns True once when a hard shake is detected."""
+        if self.addr is None:
+            return False
+        now = time.ticks_ms()
+        if time.ticks_diff(self._cooldown_until, now) > 0:
+            return False
+        try:
+            x, y, z = self.accel_g()
+        except OSError:
+            return False
+        jolt = abs((x * x + y * y + z * z) ** 0.5 - 1.0)
+        if jolt > SHAKE_G and not self._in_peak:
+            self._in_peak = True
+            self._peaks.append(now)
+        elif jolt < SHAKE_G * 0.5:
+            self._in_peak = False
+        self._peaks = [t for t in self._peaks if time.ticks_diff(now, t) < SHAKE_WINDOW_MS]
+        if len(self._peaks) >= SHAKE_PEAKS:
+            self._peaks = []
+            self._cooldown_until = time.ticks_add(now, SHAKE_COOLDOWN_MS)
+            return True
+        return False
+
+
 def big_text(fb, text, x, y, color, scale=2):
     """framebuf only has an 8x8 font; draw it scaled up."""
     import framebuf
@@ -209,6 +284,7 @@ class SketchApp(BaseApp):
         self._wall_ms = [None, None]      # last time each axis hit a wall
         self._led_frame = None
         self._dbg_ms = 0
+        self.shake = None
 
     # ---------------- setup ----------------
     def _setup_knobs(self):
@@ -330,9 +406,8 @@ class SketchApp(BaseApp):
         idle = time.ticks_diff(now, self._last_move) >= IDLE_REFRESH_MS
         overdue = time.ticks_diff(now, self._first_change) >= MAX_WAIT_MS
         if idle or overdue:
-            # Quick redraw: one pass of the short black/white waveform, no
-            # flash, and don't trigger the 35 s periodic full refresh mid-drawing.
-            display.update(fast=True, flash=False, passes=1, bw=True, auto_full=False)
+            # Partial: only the newly drawn black pixels get driven
+            display.update_partial()
             self._dirty = False
 
     # ---------------- LEDs ----------------
@@ -380,6 +455,13 @@ class SketchApp(BaseApp):
         try:
             if self.launched:
                 self._setup_knobs()
+                if self.shake is None:
+                    self.shake = Shake()
+                self._blank(flash=True)
+
+            if self.shake is not None and self.shake.poll():
+                print("Sketch: shake! erasing")
+                leds.blink("white", times=3, on_ms=80, off_ms=80)
                 self._blank(flash=True)
 
             if UserA.pressed():
