@@ -382,7 +382,18 @@ class EPaperDisplay:
         self._display_updated.set()
         gc.collect()
 
-        # Set up lvgl
+        # Set up lvgl. LVGL's C state survives a soft reset (Ctrl-D,
+        # `mpremote run`) while Python's heap doesn't, so a second init here
+        # would use stale pointers. Fail clearly instead.
+        try:
+            stale = lvgl.is_initialized()
+        except AttributeError:
+            stale = False
+        if stale:
+            raise RuntimeError(
+                "LVGL is still initialized from before a soft reset. Hard reset "
+                "(mpremote reset), or reuse the running display with "
+                "'mpremote resume run ...'")
         lvgl.init()
         # Give LVGL a buffer 2-bytes-per-pixel for RGB565 format
         self._lv_draw_buf = bytearray(display_width * display_height * 2)
@@ -633,6 +644,33 @@ class EPaperDisplay:
             else:
                 self._luts["bw_short"] = _idle_tables_lut(self._luts["nored"], 4, 9, (2, 3))
         return self._luts["bw_short"]
+
+    def _script_halves(self):
+        if getattr(self, "_sh", None) is None:
+            self._sh = [bytearray(half_frame_one_color_size) for _ in range(4)]
+        return self._sh
+
+    async def refresh_now(self, fast=True, flash=False, passes=None):
+        """Push the framebuffer and wait, without the background task.
+        For scripts run with `mpremote resume run`."""
+        bl, br, rl, rr = self._script_halves()
+        lut = _REVERSE_LUT if self._reverse_fb_bits else _IDENTITY_LUT
+        _split_halves(self._framebuffer_black, bl, br, lut)
+        _split_halves(self._framebuffer_red, rl, rr, lut)
+        self._shown_black[:] = self._framebuffer_black
+        await self.global_update(bl, rl, br, rr, fast=fast,
+                                 has_red=_any_set(self._framebuffer_red),
+                                 flash=flash, passes=passes)
+
+    async def window_test_now(self, x=200, y=200, w=120, h=80, passes=None):
+        """Like window_test(), but runs directly and waits (for scripts)."""
+        self.black.fill_rect(x, y, w, h, 1)
+        self.red.fill_rect(x, y, w, h, 0)
+        self._shown_black[:] = self._framebuffer_black
+        bl, br, rl, rr = self._script_halves()
+        lut = _REVERSE_LUT if self._reverse_fb_bits else _IDENTITY_LUT
+        await self._partial(lut, bl, rl, br, rr, passes,
+                            (y, y + h - 1, x // 8, (x + w - 1) // 8))
 
     def window_test(self, x=200, y=200, w=120, h=80, passes=None):
         """Calibrate partial windows: draws a black box and refreshes ONLY
