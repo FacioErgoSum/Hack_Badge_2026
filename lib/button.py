@@ -1,13 +1,16 @@
 """Button interface for the Billboard Badge
 
     from lib.button import UserA
-    if UserA.pressed():      # True once per press, even if the press happened
-        ...                  # while something slow (PNG decode) was running
+    if UserA.pressed():      # True once per press
+        ...
     UserA.is_down()          # live state
     UserA.held_ms()          # how long it has been held (0 if up)
 
-Presses are latched by a pin interrupt, so a quick tap can't be missed by
-the polling loop. Both edges are debounced.
+Buttons are polled every 5 ms and a level has to be stable for
+STABLE_SAMPLES polls before it counts, so glitches (e.g. coupled from the
+LED data line on GPIO38 next to User A / Menu -) are ignored. A press is
+kept for UNREAD_TTL_MS after release (so quick taps aren't lost), then
+forgotten, so a press an app never read can't leak into the menu later.
 """
 
 import machine
@@ -25,45 +28,50 @@ UNPRESSED = 0
 PRESSED_UNREAD = 1
 PRESSED_READ = 2
 
-DEBOUNCE_MS = 30
+SCAN_MS = 5
+STABLE_SAMPLES = 3   # 3 x 5 ms = level must hold 10-15 ms to count
+UNREAD_TTL_MS = 300  # a released press nobody read is dropped after this
 
 
 class Button:
     def __init__(self, pin: int, name: str):
-        self._raw = machine.Pin(pin, machine.Pin.IN, machine.Pin.PULL_UP)
-        self.pin = machine.Signal(self._raw, invert=True)
+        self.pin = machine.Signal(machine.Pin(pin, machine.Pin.IN, machine.Pin.PULL_UP), invert=True)
         self.name = name
         self.value = False
         self._pressed_state = UNPRESSED
         self._press_onset_ms = None
-        self._last_edge_ms = time.ticks_ms()
-        try:
-            self._raw.irq(trigger=machine.Pin.IRQ_FALLING, handler=self._irq)
-        except Exception as ex:
-            print(f"Button {name}: no IRQ ({ex}), polling only")
-
-    def _irq(self, _pin):
-        now = time.ticks_ms()
-        if (self._pressed_state == UNPRESSED
-                and time.ticks_diff(now, self._last_edge_ms) > DEBOUNCE_MS):
-            self._pressed_state = PRESSED_UNREAD
-            self._press_onset_ms = now
-            self._last_edge_ms = now
+        self._raw = False
+        self._stable = 0
+        self._release_ms = None
 
     def scan(self):
-        self.value = self.pin.value()
+        raw = bool(self.pin.value())
+        if raw == self._raw:
+            if self._stable < STABLE_SAMPLES:
+                self._stable += 1
+        else:
+            self._raw = raw
+            self._stable = 1
+        if self._stable < STABLE_SAMPLES:
+            return  # not settled yet, keep the last debounced state
+
+        self.value = raw
         now = time.ticks_ms()
-        if self.value:
-            if (self._pressed_state == UNPRESSED
-                    and time.ticks_diff(now, self._last_edge_ms) > DEBOUNCE_MS):
+        if raw:
+            self._release_ms = None
+            if self._pressed_state == UNPRESSED:
                 self._pressed_state = PRESSED_UNREAD
                 self._press_onset_ms = now
-                self._last_edge_ms = now
-        elif self._pressed_state == PRESSED_READ:
-            # Released after the app saw it. An unread press stays latched.
+        elif self._pressed_state == PRESSED_UNREAD:
+            # Quick tap: keep it briefly so a slow app loop still sees it
+            if self._release_ms is None:
+                self._release_ms = now
+            elif time.ticks_diff(now, self._release_ms) > UNREAD_TTL_MS:
+                self._pressed_state = UNPRESSED
+                self._press_onset_ms = None
+        else:
             self._pressed_state = UNPRESSED
             self._press_onset_ms = None
-            self._last_edge_ms = now
 
     def pressed(self) -> bool:
         """Was a button pressed? Only returns True once for each press."""
@@ -72,8 +80,13 @@ class Button:
             return True
         return False
 
+    def flush(self):
+        """Forget any unread press (a held button stays 'read' until released)."""
+        if self._pressed_state == PRESSED_UNREAD:
+            self._pressed_state = PRESSED_READ
+
     def is_down(self) -> bool:
-        return bool(self.pin.value())
+        return self.value
 
     def pressed_ms(self) -> int:
         if self.value and self._press_onset_ms is not None:
@@ -102,9 +115,14 @@ Boot = Button(BOOT_PIN, "Boot")
 ALL_BUTTONS = (MenuMinus, MenuPlus, UserA, UserB, Boot)
 
 
+def flush_all():
+    for b in ALL_BUTTONS:
+        b.flush()
+
+
 async def scan():
     """Scan buttons and update persisted state"""
     while True:
         for b in ALL_BUTTONS:
             b.scan()
-        await aio.sleep_ms(5)
+        await aio.sleep_ms(SCAN_MS)
