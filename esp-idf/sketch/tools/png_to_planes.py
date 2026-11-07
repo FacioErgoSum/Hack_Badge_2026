@@ -1,6 +1,6 @@
 """Turn a palette PNG into the panel's two 1-bpp planes, as a C header.
 
-    python3 tools/png_to_planes.py ../../data/gallery/EtchASketch.png src/etch_frame.h
+    python3 tools/png_to_planes.py ../../data/gallery/HackASketch.png src/etch_frame.h
 
 Colours are sorted the way lib/large_png.py does it on the MicroPython side:
 red if R >= 128 and G, B < 128, black if all three < 128, white otherwise.

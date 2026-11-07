@@ -24,7 +24,7 @@
 //           flashes red when the pen hits a wall. Off while the knobs are still.
 //
 // Refreshing
-//   The Etch A Sketch frame (data/gallery/EtchASketch.png, baked into
+//   The Hack-A-Sketch frame (data/gallery/HackASketch.png, baked into
 //   etch_frame.h) goes up once with EPD_SLOW, the only mode that makes good red.
 //   New lines go out with EPD_FAST_INK: only the pixels drawn since the last
 //   refresh are driven, so the rest of the panel doesn't flash. Erases use
@@ -98,7 +98,7 @@
 #define SAO_SDA      17
 #define SAO_SCL      18
 
-// --- Frame geometry (matches data/gallery/EtchASketch.png) -------------------
+// --- Frame geometry (matches data/gallery/HackASketch.png) -------------------
 // Largest all-white box inside the image's screen, clear of the rounded corners
 #define SCR_X0  132
 #define SCR_Y0  121
