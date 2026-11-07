@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Badge Sketches</title>
+  <meta name="description" content="Everything drawn on Geoff's Supercon 2026 badge, with a live view of the one being drawn now.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Badge Sketches</h1>
+    <div id="status" class="status" data-state="unknown" role="status">
+      <span class="dot" aria-hidden="true"></span><span id="status-text">Checking the badge…</span>
+    </div>
+  </header>
+
+  <main>
+    <div class="frame" id="frame">
+      <img src="etch.png" alt="" width="960" height="672">
+      <svg id="art" viewBox="0 0 960 672" aria-label="Drawing">
+        <defs>
+          <clipPath id="screen"><rect x="124" y="116" width="712" height="412" rx="22"/></clipPath>
+        </defs>
+        <g clip-path="url(#screen)">
+          <polyline id="line" fill="none" stroke-width="3" stroke-linecap="square" stroke-linejoin="miter"/>
+          <circle id="pen" r="5" visibility="hidden"/>
+          <text id="empty" x="480" y="330" text-anchor="middle"></text>
+        </g>
+        <g id="live-tag" visibility="hidden">
+          <rect x="738" y="130" width="90" height="28" rx="14"/>
+          <circle cx="756" cy="144" r="5"/>
+          <text x="768" y="150">LIVE</text>
+        </g>
+        <text id="stamp" x="480" y="606" text-anchor="middle"></text>
+        <text id="count" x="480" y="638" text-anchor="middle"></text>
+      </svg>
+      <button class="knob prev" id="prev" aria-label="Older drawing"><span aria-hidden="true">‹</span></button>
+      <button class="knob next" id="next" aria-label="Newer drawing"><span aria-hidden="true">›</span></button>
+    </div>
+
+    <div class="tools">
+      <button id="replay" class="pill">Replay</button>
+      <button id="to-live" class="pill">Live view</button>
+      <a id="png" class="pill" download>Save PNG</a>
+      <button id="delete" class="pill danger" hidden>Delete</button>
+    </div>
+    <p class="hint">Arrow keys work too. Drawings show up here when the badge is erased.</p>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

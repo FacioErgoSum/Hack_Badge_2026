@@ -2,3 +2,5 @@
 .vscode/
 sdkconfig.badge
 sdkconfig.old
+build_idf/
+src/wifi_secrets.h

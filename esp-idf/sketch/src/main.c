@@ -2,9 +2,16 @@
 // Sketch - standalone ESP-IDF firmware for the 2026 Supercon billboard badge.
 //
 // A knob-drawing toy: the left knob moves the pen left/right, the right knob
-// up/down (clockwise = right / up). Shake the badge hard, or press User A, to
-// erase. User B does a full refresh to clean up ghosting (or, with only one
-// knob, switches which axis it drives).
+// up/down (clockwise = right / up). Shake the badge hard, or press User B, to
+// erase - the drawing is uploaded to the gallery website as it's erased. (With
+// only one knob, User B switches which axis it drives instead.)
+//
+// User A opens the gallery: the label, then the newest drawings from the
+// website with their times. Turn either knob to flip through them; they also
+// step along on their own. User A (or B) goes back to the drawing as it was.
+//
+// Wi-Fi and the website are set in src/wifi_secrets.h; all of it lives in
+// net.c, in its own task. While you draw, the website's live view follows.
 //
 // Hardware
 //   Knobs   AS5600 magnetic encoder SAOs, analog OUT on the SAO's GPIO1. Every
@@ -37,11 +44,22 @@
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 
 #include "epd97.h"
 #include "etch_frame.h"
+#include "net.h"
 #include "ws2812.h"
+
+// The gallery's title card: a drawing made on the badge, baked in by
+// tools/drawing_to_label.py. Until there is one, the title is text.
+#if __has_include("gallery_label.h")
+#include "gallery_label.h"
+#define HAVE_LABEL 1
+#else
+#define HAVE_LABEL 0
+#endif
 
 // --- Tunables -----------------------------------------------------------------
 #define PX_PER_REV        240     // pen travel per full knob turn
@@ -66,6 +84,13 @@
 #define SHAKE_PEAKS       4       // this many jolts...
 #define SHAKE_WINDOW_MS   1200    // ...within this long erases
 #define SHAKE_COOLDOWN_MS 3000
+
+#define GALLERY_LABEL_MS  1500    // the title card stays up at least this long
+#define GALLERY_STEP      512     // knob counts (of 4096 per turn) per drawing
+#define GALLERY_SETTLE_MS 250     // show the drawing once the knob rests this long
+#define GALLERY_AUTO_MS   10000   // step to the next drawing on its own this often...
+#define GALLERY_AUTO_FOR  300000  // ...for this long after the last knob turn
+#define GALLERY_FAIL_MS   4000    // "offline" stays up this long, then back to drawing
 
 // --- Pins ---------------------------------------------------------------------
 #define BTN_USER_A   39
@@ -372,11 +397,32 @@ static void leds_turned(int axis, int counts, uint32_t t)
   s_turn_ms[axis] = t;
 }
 
+// Network feedback: a sweep across all eight that wins over the knob dots
+static uint32_t s_flash_ms, s_flash_len;
+static uint8_t s_flash_rgb[3];
+
+static void leds_flash(uint8_t r, uint8_t g, uint8_t b, uint32_t len, uint32_t t)
+{
+  s_flash_rgb[0] = r; s_flash_rgb[1] = g; s_flash_rgb[2] = b;
+  s_flash_ms = t;
+  s_flash_len = len;
+}
+
 static void leds_update(uint32_t t)
 {
   static uint8_t last[WS2812_COUNT][3];
   static bool have_last;
   uint8_t f[WS2812_COUNT][3] = { { 0 } };
+
+  if (net_take_uploaded())  leds_flash(0, 255, 40, 700, t);    // green: on the website
+  if (net_take_connected()) leds_flash(0, 60, 255, 700, t);    // blue: joined Wi-Fi
+
+  if (s_flash_ms && t - s_flash_ms < s_flash_len) {
+    // Light fills in from LED 0 to 7 over the first half, then holds
+    int lit = (int)((t - s_flash_ms) * 2 * WS2812_COUNT / s_flash_len) + 1;
+    for (int i = 0; i < WS2812_COUNT && i < lit; i++) memcpy(f[i], s_flash_rgb, 3);
+    goto out;
+  }
   for (int a = 0; a < 2; a++) {
     uint8_t* side = f[s_led_group[a] * 4];
     if (s_wall_ms[a] && t - s_wall_ms[a] < LED_WALL_MS) {
@@ -389,6 +435,7 @@ static void leds_update(uint32_t t)
       else        { q[0] = 255; q[1] = 0;   q[2] = 255; }   // magenta
     }
   }
+out:
   if (have_last && memcmp(f, last, sizeof(f)) == 0) return;
   memcpy(last, f, sizeof(f));
   have_last = true;
@@ -397,11 +444,71 @@ static void leds_update(uint32_t t)
 }
 
 // =============================================================================
+// Pages: the gallery's title card and its drawings
+// =============================================================================
+static void draw_path(const int16_t* xy, int n)
+{
+  int px = 0, py = 0;
+  for (int i = 0; i < n; i++) {
+    int x = xy[2 * i], y = xy[2 * i + 1];
+    x = x < X_MIN ? X_MIN : x > X_MAX ? X_MAX : x;
+    y = y < Y_MIN ? Y_MIN : y > Y_MAX ? Y_MAX : y;
+    if (i == 0) stamp(x, y);
+    else        draw_line(px, py, x, y);
+    px = x;
+    py = y;
+  }
+}
+
+// Black text on a white patch, so it reads over a drawing
+#define CAPTION_SCALE 2
+#define CAPTION_Y     (Y_MAX - 8 * CAPTION_SCALE - 6)
+
+static void caption(int x, const char* s)
+{
+  int w = epd_text_width(s, CAPTION_SCALE);
+  epd_fill_rect(x - 4, CAPTION_Y - 4, w + 8, 8 * CAPTION_SCALE + 6, EPD_WHITE);
+  epd_text(x, CAPTION_Y, s, EPD_BLACK, CAPTION_SCALE);
+}
+
+static void caption_right(const char* s)
+{
+  caption(X_MAX - 6 - epd_text_width(s, CAPTION_SCALE), s);
+}
+
+static void page_label(const char* note)
+{
+  draw_frame(NULL);
+#if HAVE_LABEL
+  draw_path(k_gallery_label, k_gallery_label_n);
+#else
+  const char* title = "GALLERY";
+  int w = epd_text_width(title, 10);
+  epd_text((SCR_X0 + SCR_X1 - w) / 2, (SCR_Y0 + SCR_Y1) / 2 - 40, title, EPD_BLACK, 10);
+#endif
+  if (note) caption_right(note);
+  request_refresh(EPD_FAST_KEEP_RED);
+}
+
+static void page_drawing(int i, int n)
+{
+  const net_gallery_item_t* it = net_gallery_item(i);
+  draw_frame(NULL);
+  if (it) draw_path(it->xy, it->n);
+  char num[16];
+  snprintf(num, sizeof(num), "%d/%d", i + 1, n);
+  caption(X_MIN + 6, num);
+  if (it && it->t[0]) caption_right(it->t);
+  request_refresh(EPD_FAST_KEEP_RED);
+}
+
+// =============================================================================
 // App
 // =============================================================================
 static int s_px = (X_MIN + X_MAX) / 2, s_py = (Y_MIN + Y_MAX) / 2;
 static float s_fx, s_fy;
 static bool s_single_x = true;   // one-knob mode: which axis it drives
+static uint8_t* s_saved[2];      // the drawing's planes while the gallery is up
 
 static const char* status_text(void)
 {
@@ -417,12 +524,26 @@ static void erase(epd_refresh_t mode)
   request_refresh(mode);
 }
 
+// Erase, sending the drawing to the website on the way out
+static void erase_and_upload(uint32_t t)
+{
+  if (net_path_finish() && !net_online()) leds_flash(255, 120, 0, 700, t);   // amber: saved for later
+  erase(EPD_FAST_KEEP_RED);
+  net_path_begin(s_px, s_py);
+}
+
+static void wait_panel_idle(void)
+{
+  for (int i = 0; i < 6000 && (s_epd_busy || s_req_pending); i++) vTaskDelay(pdMS_TO_TICKS(10));
+}
+
 void app_main(void)
 {
   printf("\n=== Sketch (ESP-IDF) ===\n");
   ws2812_init();
   ws2812_set_brightness(LED_BRIGHTNESS);
   ws2812_fill(0, 0, 0);
+  net_start();
 
   gpio_config_t bc = {
     .pin_bit_mask = (1ULL << BTN_USER_A) | (1ULL << BTN_USER_B),
@@ -469,37 +590,132 @@ void app_main(void)
   epd_set_keep_awake(true);   // lines then cost planes + trigger, not a power-up
   xTaskCreatePinnedToCore(epd_task, "epd", 8192, NULL, 5, &s_epd_task, 1);
   erase(EPD_SLOW);            // full refresh: clears the panel and makes good red
+  net_path_begin(s_px, s_py);
 
   bool dirty = false, drawn_since_clean = false;
   uint32_t first_change = 0, last_move = 0, last_activity = now_ms(), last_clean = now_ms();
 
+  // Gallery state
+  bool gallery = false, g_note = false;
+  int g_shown = -1, g_want = 0, g_acc = 0;   // g_shown -1: the title card
+  uint32_t g_entered = 0, g_turned = 0, g_stepped = 0, g_note_at = 0;
+
   for (;;) {
     uint32_t t = now_ms();
 
+    // -------------------------------------------------------------- gallery --
+    if (gallery) {
+      bool a = button_pressed(&btn_a), b = button_pressed(&btn_b);
+      bool leave = a || b;
+      (void)shake_detected();   // keep its window current; shaking doesn't erase in here
+
+      int d = 0;
+      if (s_knob_x) d += knob_delta(s_knob_x);
+      if (s_knob_y) d += knob_delta(s_knob_y);
+      if (d) {
+        g_acc += d;
+        g_turned = t;
+        last_activity = t;
+        leds_turned(0, d, t);
+      }
+
+      net_gallery_state_t gs = net_gallery_state();
+      int n = net_gallery_count();
+      if (gs == NET_GALLERY_READY && n > 0) {
+        while (g_acc >= GALLERY_STEP)  { g_acc -= GALLERY_STEP; g_want = (g_want + 1) % n; }
+        while (g_acc <= -GALLERY_STEP) { g_acc += GALLERY_STEP; g_want = (g_want + n - 1) % n; }
+        if (g_shown >= 0 && g_want == g_shown && t - g_turned < GALLERY_AUTO_FOR &&
+            t - g_stepped >= GALLERY_AUTO_MS) {
+          g_want = (g_shown + 1) % n;
+        }
+        if (g_want != g_shown && t - g_entered >= GALLERY_LABEL_MS && t - g_turned >= GALLERY_SETTLE_MS &&
+            !s_epd_busy && !s_req_pending) {
+          page_drawing(g_want, n);
+          g_shown = g_want;
+          g_stepped = t;
+          last_activity = t;
+        }
+      } else if (!g_note && (gs == NET_GALLERY_FAILED || gs == NET_GALLERY_READY) &&
+                 !s_epd_busy && !s_req_pending) {
+        page_label(gs == NET_GALLERY_READY ? "nothing here yet" : "offline");
+        g_note = true;
+        g_note_at = t;
+      }
+      if (g_note && t - g_note_at >= GALLERY_FAIL_MS) leave = true;
+
+      if (leave) {
+        wait_panel_idle();
+        memcpy(epd_plane_bw(), s_saved[0], EPD_PLANE_BYTES);
+        memcpy(epd_plane_red(), s_saved[1], EPD_PLANE_BYTES);
+        request_refresh(EPD_FAST_KEEP_RED);
+        net_gallery_free();
+        net_set_mode(NET_MODE_DRAWING);
+        gallery = false;
+        drawn_since_clean = true;   // all those fast pages: clean up when it's quiet
+        last_activity = t;
+        printf("sketch: back to drawing\n");
+      }
+
+      if (gallery && epd_keep_awake() && !s_epd_busy && !s_req_pending &&
+          t - last_activity > SLEEP_AFTER_MS && t - g_turned >= GALLERY_AUTO_FOR) {
+        request_sleep();
+        last_activity = t;
+      }
+      leds_update(t);
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
+
+    // -------------------------------------------------------------- drawing --
     if (shake_detected()) {
       printf("sketch: shake, erasing\n");
       for (int i = 0; i < 3; i++) {
         ws2812_fill(255, 255, 255); vTaskDelay(pdMS_TO_TICKS(80));
         ws2812_fill(0, 0, 0);       vTaskDelay(pdMS_TO_TICKS(80));
       }
-      erase(EPD_FAST_KEEP_RED);
+      erase_and_upload(t);
       dirty = false;
       last_activity = t;
     }
     if (button_pressed(&btn_a)) {
-      erase(EPD_FAST_KEEP_RED);
-      dirty = false;
-      last_activity = t;
+      // Into the gallery: keep the drawing to put back afterwards
+      if (!s_saved[0]) s_saved[0] = heap_caps_malloc(EPD_PLANE_BYTES, MALLOC_CAP_SPIRAM);
+      if (!s_saved[1]) s_saved[1] = heap_caps_malloc(EPD_PLANE_BYTES, MALLOC_CAP_SPIRAM);
+      if (s_saved[0] && s_saved[1]) {
+        printf("sketch: gallery\n");
+        wait_panel_idle();
+        memcpy(s_saved[0], epd_plane_bw(), EPD_PLANE_BYTES);
+        memcpy(s_saved[1], epd_plane_red(), EPD_PLANE_BYTES);
+        gallery = true;
+        dirty = false;
+        net_set_mode(NET_MODE_GALLERY);
+        g_shown = -1;
+        g_want = 0;
+        g_acc = 0;
+        g_entered = g_turned = g_stepped = now_ms();
+        last_activity = g_entered;
+        if (!net_configured()) {
+          page_label("no website set up");
+          g_note = true;
+        } else if (!net_online()) {
+          page_label("offline");
+          g_note = true;
+        } else {
+          page_label("loading...");
+          g_note = false;
+          net_gallery_request();
+        }
+        g_note_at = g_entered;
+        continue;
+      }
     }
     if (button_pressed(&btn_b)) {
       if (s_knob_x && !s_knob_y) {
         s_single_x = !s_single_x;
         printf("sketch: knob now drives %s\n", s_single_x ? "X" : "Y");
       } else {
-        request_refresh(EPD_SLOW);   // full clean-up of the current drawing
+        erase_and_upload(t);
         dirty = false;
-        drawn_since_clean = false;
-        last_clean = t;
       }
       last_activity = t;
     }
@@ -530,6 +746,7 @@ void app_main(void)
       if (ny < Y_MIN || ny > Y_MAX) { s_fy = 0; ny = ny < Y_MIN ? Y_MIN : Y_MAX; s_wall_ms[1] = t; }
       if (nx != s_px || ny != s_py) {
         draw_line(s_px, s_py, nx, ny);
+        net_path_add(nx, ny);
         s_px = nx;
         s_py = ny;
         if (!dirty) first_change = t;

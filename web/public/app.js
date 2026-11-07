@@ -1,0 +1,265 @@
+// Badge Sketches: the gallery of finished drawings plus a live slide.
+//
+// Slides run newest first: slides[0] is LIVE, slides[1] the newest drawing.
+// The left knob goes back in time (older), the right knob forward (newer).
+(() => {
+  "use strict";
+
+  const $ = (id) => document.getElementById(id);
+  const line = $("line"), pen = $("pen"), empty = $("empty"), stamp = $("stamp"), count = $("count");
+  const liveTag = $("live-tag"), statusEl = $("status"), statusText = $("status-text");
+  const prevBtn = $("prev"), nextBtn = $("next"), replayBtn = $("replay"), liveBtn = $("to-live");
+  const pngLink = $("png"), delBtn = $("delete");
+  const admin = new URLSearchParams(location.search).has("admin");
+
+  let keys = [];            // [{key, ts, t}] newest first
+  let index = 0;            // 0 = live, i = keys[i - 1]
+  const cache = new Map();  // key -> {t, pts}
+  let live = { id: "", pts: [], online: false, mode: "idle", seen: 0, seenText: "" };
+  let shownPts = [];
+  let anim = 0;
+  let livePollTimer = 0;
+
+  // --- Points --------------------------------------------------------------
+  function decode(b64) {
+    if (!b64) return [];
+    const bin = atob(b64);
+    const pts = [];
+    for (let i = 0; i + 3 < bin.length; i += 4) {
+      let x = bin.charCodeAt(i) | (bin.charCodeAt(i + 1) << 8);
+      let y = bin.charCodeAt(i + 2) | (bin.charCodeAt(i + 3) << 8);
+      if (x & 0x8000) x -= 0x10000;
+      if (y & 0x8000) y -= 0x10000;
+      pts.push([x, y]);
+    }
+    return pts;
+  }
+  const toAttr = (pts) => pts.map((p) => p[0] + "," + p[1]).join(" ");
+
+  function draw(pts, { showPen = false } = {}) {
+    cancelAnimationFrame(anim);
+    shownPts = pts;
+    line.setAttribute("points", toAttr(pts));
+    if (showPen && pts.length) {
+      const [x, y] = pts[pts.length - 1];
+      pen.setAttribute("cx", x);
+      pen.setAttribute("cy", y);
+      pen.setAttribute("visibility", "visible");
+    } else {
+      pen.setAttribute("visibility", "hidden");
+    }
+  }
+
+  function replay() {
+    const pts = shownPts;
+    if (pts.length < 2) return;
+    cancelAnimationFrame(anim);
+    // Pace by path length so long drawings don't crawl or short ones blink
+    let total = 0;
+    const acc = [0];
+    for (let i = 1; i < pts.length; i++) {
+      total += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+      acc.push(total);
+    }
+    const ms = Math.min(6000, Math.max(1200, total * 1.5));
+    const t0 = performance.now();
+    const step = (now) => {
+      const want = Math.min(1, (now - t0) / ms) * total;
+      let n = 1;
+      while (n < pts.length && acc[n] <= want) n++;
+      const part = pts.slice(0, n);
+      line.setAttribute("points", toAttr(part));
+      const [x, y] = part[part.length - 1];
+      pen.setAttribute("cx", x); pen.setAttribute("cy", y); pen.setAttribute("visibility", "visible");
+      if (n < pts.length) anim = requestAnimationFrame(step);
+      else pen.setAttribute("visibility", "hidden");
+    };
+    anim = requestAnimationFrame(step);
+  }
+
+  // --- API -----------------------------------------------------------------
+  async function api(path, opts) {
+    const r = await fetch(path, opts);
+    if (!r.ok) throw new Error(path + " " + r.status);
+    return r.json();
+  }
+
+  async function loadKeys() {
+    try {
+      const data = await api("/api/drawings?keys=1");
+      const current = index > 0 ? keys[index - 1]?.key : null;
+      keys = data.keys || [];
+      if (current) {
+        const i = keys.findIndex((k) => k.key === current);
+        index = i >= 0 ? i + 1 : Math.min(index, keys.length);
+      }
+    } catch (e) {
+      console.warn(e);
+    }
+  }
+
+  async function getDrawing(key) {
+    if (!cache.has(key)) {
+      const d = await api("/api/drawings?key=" + encodeURIComponent(key));
+      cache.set(key, { t: d.t, pts: decode(d.p) });
+    }
+    return cache.get(key);
+  }
+
+  // --- Status pill -----------------------------------------------------------
+  function ago(ts) {
+    const s = Math.round((Date.now() - ts) / 1000);
+    if (s < 90) return "a minute ago";
+    if (s < 3600) return Math.round(s / 60) + " min ago";
+    if (s < 86400) return Math.round(s / 3600) + " h ago";
+    return live.seenText;
+  }
+
+  function renderStatus() {
+    if (live.online) {
+      statusEl.dataset.state = "online";
+      statusText.textContent = live.mode === "gallery" ? "Badge online · showing the gallery" : "Badge online · drawing";
+    } else {
+      statusEl.dataset.state = "offline";
+      statusText.textContent = live.seen ? "Badge offline · last seen " + ago(live.seen) : "Badge offline";
+    }
+  }
+
+  async function pollLive() {
+    try {
+      const from = live.id ? live.pts.length : 0;
+      const d = await api(`/api/live?id=${encodeURIComponent(live.id)}&from=${from}`);
+      const changed = d.id !== live.id;
+      if (changed) {
+        // The badge was erased: that drawing is (or will be) in the gallery
+        if (live.id) setTimeout(() => loadKeys().then(render), 2500);
+        live.pts = decode(d.p);
+      } else if (d.from === from) {
+        live.pts = live.pts.concat(decode(d.p));
+      } else {
+        live.pts = decode(d.p);
+      }
+      Object.assign(live, { id: d.id, online: d.online, mode: d.mode, seen: d.seen, seenText: d.seenText });
+      renderStatus();
+      if (index === 0) renderLive();
+    } catch (e) {
+      console.warn(e);
+    }
+    clearTimeout(livePollTimer);
+    const fast = index === 0 && live.online && !document.hidden;
+    livePollTimer = setTimeout(pollLive, fast ? 2000 : 12000);
+  }
+
+  // --- Slides --------------------------------------------------------------
+  function renderLive() {
+    liveTag.setAttribute("visibility", live.online ? "visible" : "hidden");
+    draw(live.pts, { showPen: live.online });
+    empty.textContent = live.pts.length ? "" : live.online ? "Waiting for the knobs to turn…" : "The badge is offline";
+    stamp.textContent = live.online ? "DRAWING NOW" : "LIVE VIEW";
+    count.textContent = keys.length ? "‹ " + keys.length + " in the gallery" : "";
+  }
+
+  async function render() {
+    prevBtn.disabled = index >= keys.length;
+    nextBtn.disabled = index <= 0;
+    liveBtn.disabled = index === 0;
+    delBtn.hidden = !admin || index === 0;
+    pngLink.removeAttribute("href");
+
+    if (index === 0) {
+      renderLive();
+      history.replaceState(null, "", location.pathname + location.search);
+      clearTimeout(livePollTimer);
+      pollLive();
+      return;
+    }
+    liveTag.setAttribute("visibility", "hidden");
+    const k = keys[index - 1];
+    stamp.textContent = k.t.toUpperCase();
+    count.textContent = `${keys.length - index + 1} OF ${keys.length}`;
+    empty.textContent = "";
+    history.replaceState(null, "", "#" + k.key);
+    try {
+      const d = await getDrawing(k.key);
+      if (keys[index - 1] !== k) return;   // moved on while loading
+      draw(d.pts);
+    } catch (e) {
+      draw([]);
+      empty.textContent = "Couldn't load this one";
+    }
+  }
+
+  function go(to) {
+    index = Math.max(0, Math.min(keys.length, to));
+    render();
+  }
+
+  // --- PNG export: frame + line on a canvas ------------------------------------
+  async function makePng() {
+    const img = new Image();
+    img.src = "etch.png";
+    await img.decode();
+    const c = document.createElement("canvas");
+    c.width = 960; c.height = 672;
+    const g = c.getContext("2d");
+    g.drawImage(img, 0, 0);
+    g.strokeStyle = "#3b3b3b"; g.lineWidth = 3; g.lineCap = "square"; g.lineJoin = "miter";
+    g.beginPath();
+    shownPts.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
+    g.stroke();
+    g.fillStyle = "#fff"; g.font = "700 30px system-ui, sans-serif"; g.textAlign = "center";
+    g.fillText(stamp.textContent, 480, 606);
+    return c.toDataURL("image/png");
+  }
+
+  pngLink.addEventListener("click", async (e) => {
+    if (pngLink.getAttribute("href")) return;
+    e.preventDefault();
+    pngLink.href = await makePng();
+    pngLink.download = index > 0 ? "badge-" + keys[index - 1].key.slice(2) + ".png" : "badge-live.png";
+    pngLink.click();
+  });
+
+  // --- Admin delete (open the page with ?admin) ------------------------------
+  delBtn.addEventListener("click", async () => {
+    const k = keys[index - 1];
+    if (!k) return;
+    let key = "";
+    try { key = localStorage.getItem("adminKey") || ""; } catch {}
+    if (!key) key = prompt("Admin key") || "";
+    if (!key || !confirm("Delete the drawing from " + k.t + "?")) return;
+    const r = await fetch("/api/drawings?key=" + encodeURIComponent(k.key), {
+      method: "DELETE", headers: { "x-admin-key": key },
+    });
+    if (r.status === 401) {
+      try { localStorage.removeItem("adminKey"); } catch {}
+      alert("Wrong admin key");
+      return;
+    }
+    try { localStorage.setItem("adminKey", key); } catch {}
+    cache.delete(k.key);
+    await loadKeys();
+    go(index);
+  });
+
+  // --- Wiring ----------------------------------------------------------------
+  prevBtn.addEventListener("click", () => go(index + 1));
+  nextBtn.addEventListener("click", () => go(index - 1));
+  liveBtn.addEventListener("click", () => go(0));
+  replayBtn.addEventListener("click", replay);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowLeft") go(index + 1);
+    else if (e.key === "ArrowRight") go(index - 1);
+  });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) pollLive(); });
+  setInterval(() => loadKeys().then(() => { prevBtn.disabled = index >= keys.length; if (index === 0) renderLive(); }), 30000);
+
+  (async () => {
+    await Promise.all([loadKeys(), pollLive()]);
+    const want = decodeURIComponent(location.hash.slice(1));
+    const i = keys.findIndex((k) => k.key === want);
+    if (i >= 0) index = i + 1;
+    else index = live.online || !keys.length ? 0 : 1;
+    render();
+  })();
+})();

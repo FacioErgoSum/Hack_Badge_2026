@@ -1,0 +1,5 @@
+# Netlify: the badge gallery site lives in web/
+[build]
+  base      = "web"
+  publish   = "public"
+  functions = "netlify/functions"
