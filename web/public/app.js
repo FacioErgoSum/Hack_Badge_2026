@@ -199,14 +199,15 @@
     const img = new Image();
     img.src = "etch.png";
     await img.decode();
+    // Twice the badge's resolution, like etch.png, so it stays sharp
     const c = document.createElement("canvas");
-    c.width = 960; c.height = 672;
+    c.width = 1920; c.height = 1344;
     const g = c.getContext("2d");
-    // etch.png's screen and corners are see-through: start from solid white,
-    // or viewers with a dark background show a dark line on black
+    g.scale(2, 2);   // draw in the badge's 960x672 coordinates
+    // Solid white underneath, so nothing in the file is see-through
     g.fillStyle = "#fff";
-    g.fillRect(0, 0, c.width, c.height);
-    g.drawImage(img, 0, 0);
+    g.fillRect(0, 0, 960, 672);
+    g.drawImage(img, 0, 0, 960, 672);
     g.strokeStyle = "#3b3b3b"; g.lineWidth = 3; g.lineCap = "square"; g.lineJoin = "miter";
     g.beginPath();
     shownPts.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
