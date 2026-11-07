@@ -17,7 +17,7 @@
   const liveTag = $("live-tag"), statusEl = $("status"), statusText = $("status-text");
   const leftBtn = $("left"), rightBtn = $("right"), replayBtn = $("replay"), liveBtn = $("to-live");
   const gripX = leftBtn.querySelector(".grip"), gripY = rightBtn.querySelector(".grip");
-  const pngLink = $("png"), delBtn = $("delete");
+  const pngBtn = $("png"), delBtn = $("delete"), tools = $("tools");
   const admin = new URLSearchParams(location.search).has("admin");
 
   let keys = [];            // [{key, ts, t}] newest first
@@ -183,16 +183,15 @@
     liveTag.setAttribute("visibility", live.online ? "visible" : "hidden");
     draw(live.pts, { showPen: live.online });
     empty.textContent = live.pts.length ? "" : live.online ? "Waiting for the knobs to turn…" : "The badge is offline";
-    stamp.textContent = live.online ? "DRAWING NOW" : "LIVE VIEW";
+    stamp.textContent = "LIVE VIEW";
     count.textContent = keys.length ? keys.length + " IN THE GALLERY ›" : "";
   }
 
   async function render() {
     leftBtn.disabled = index <= 0;
     rightBtn.disabled = index >= keys.length;
-    liveBtn.disabled = index === 0;
-    delBtn.hidden = !admin || index === 0;
-    pngLink.removeAttribute("href");
+    tools.hidden = index === 0;   // replay / download / delete are for gallery drawings
+    delBtn.hidden = !admin;
 
     if (index === 0) {
       renderLive();
@@ -246,8 +245,7 @@
   }
 
   // Made fresh on every click, so it's always the drawing on screen right now
-  pngLink.addEventListener("click", async (e) => {
-    e.preventDefault();
+  pngBtn.addEventListener("click", async () => {
     const blob = await makePng();
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");

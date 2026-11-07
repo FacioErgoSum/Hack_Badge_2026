@@ -9,7 +9,7 @@
 </head>
 <body>
   <header>
-    <h1>Hack-<span>A</span>-Sketch</h1>
+    <h1>Hack-A-Sketch</h1>
     <div id="status" class="status" data-state="unknown" role="status">
       <span class="dot" aria-hidden="true"></span><span id="status-text">Checking the badge…</span>
     </div>
@@ -39,10 +39,14 @@
       <button class="knob right" id="right" aria-label="Older drawing"><span class="grip" aria-hidden="true"></span><span class="cap" aria-hidden="true">›</span></button>
     </div>
 
-    <div class="tools">
-      <button id="replay" class="pill">Replay</button>
+    <div class="tools" id="tools" hidden>
+      <button id="replay" class="icon" aria-label="Replay" title="Replay">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 3v5h5"/><path d="M10 8.5v7l5.5-3.5z" class="fill"/></svg>
+      </button>
+      <button id="png" class="icon" aria-label="Download PNG" title="Download PNG">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/></svg>
+      </button>
       <button id="to-live" class="pill">Live view</button>
-      <a id="png" class="pill" download>Save PNG</a>
       <button id="delete" class="pill danger" hidden>Delete</button>
     </div>
     <p class="hint">Arrow keys work too. Drawings show up here when the badge is erased.</p>
