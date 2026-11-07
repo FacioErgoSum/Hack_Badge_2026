@@ -202,6 +202,10 @@
     const c = document.createElement("canvas");
     c.width = 960; c.height = 672;
     const g = c.getContext("2d");
+    // etch.png's screen and corners are see-through: start from solid white,
+    // or viewers with a dark background show a dark line on black
+    g.fillStyle = "#fff";
+    g.fillRect(0, 0, c.width, c.height);
     g.drawImage(img, 0, 0);
     g.strokeStyle = "#3b3b3b"; g.lineWidth = 3; g.lineCap = "square"; g.lineJoin = "miter";
     g.beginPath();
@@ -209,15 +213,21 @@
     g.stroke();
     g.fillStyle = "#fff"; g.font = "700 30px system-ui, sans-serif"; g.textAlign = "center";
     g.fillText(stamp.textContent, 480, 606);
-    return c.toDataURL("image/png");
+    return new Promise((resolve) => c.toBlob(resolve, "image/png"));
   }
 
+  // Made fresh on every click, so it's always the drawing on screen right now
   pngLink.addEventListener("click", async (e) => {
-    if (pngLink.getAttribute("href")) return;
     e.preventDefault();
-    pngLink.href = await makePng();
-    pngLink.download = index > 0 ? "badge-" + keys[index - 1].key.slice(2) + ".png" : "badge-live.png";
-    pngLink.click();
+    const blob = await makePng();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = index > 0 ? "badge-" + keys[index - 1].key.slice(2) + ".png" : "badge-live.png";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
   });
 
   // --- Admin delete (open the page with ?admin) ------------------------------
