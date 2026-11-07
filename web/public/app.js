@@ -1,4 +1,4 @@
-// Badge Sketches: the gallery of finished drawings plus a live slide.
+// Hack-A-Sketch: the gallery of finished drawings plus a live slide.
 //
 // Slides run newest first, left to right: slides[0] is LIVE, slides[1] the
 // newest drawing, the last one the oldest. The right knob steps back in time.
@@ -143,21 +143,13 @@
   }
 
   // --- Status pill -----------------------------------------------------------
-  function ago(ts) {
-    const s = Math.round((Date.now() - ts) / 1000);
-    if (s < 90) return "a minute ago";
-    if (s < 3600) return Math.round(s / 60) + " min ago";
-    if (s < 86400) return Math.round(s / 3600) + " h ago";
-    return live.seenText;
-  }
-
   function renderStatus() {
     if (live.online) {
       statusEl.dataset.state = "online";
-      statusText.textContent = live.mode === "gallery" ? "Badge online · showing the gallery" : "Badge online · drawing";
+      statusText.textContent = "Badge Online";
     } else {
       statusEl.dataset.state = "offline";
-      statusText.textContent = live.seen ? "Badge offline · last seen " + ago(live.seen) : "Badge offline";
+      statusText.textContent = "Badge Offline";
     }
   }
 
