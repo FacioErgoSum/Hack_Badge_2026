@@ -24,7 +24,7 @@
         </defs>
         <g clip-path="url(#screen)">
           <polyline id="line" fill="none" stroke-width="3" stroke-linecap="square" stroke-linejoin="miter"/>
-          <circle id="pen" r="5" visibility="hidden"/>
+          <rect id="pen" width="8" height="8" visibility="hidden"/>
           <text id="empty" x="480" y="330" text-anchor="middle"></text>
         </g>
         <g id="live-tag" visibility="hidden">
@@ -35,8 +35,8 @@
         <text id="stamp" x="480" y="606" text-anchor="middle"></text>
         <text id="count" x="480" y="638" text-anchor="middle"></text>
       </svg>
-      <button class="knob prev" id="prev" aria-label="Older drawing"><span aria-hidden="true">‹</span></button>
-      <button class="knob next" id="next" aria-label="Newer drawing"><span aria-hidden="true">›</span></button>
+      <button class="knob left" id="left" aria-label="Newer drawing"><span class="grip" aria-hidden="true"></span><span class="cap" aria-hidden="true">‹</span></button>
+      <button class="knob right" id="right" aria-label="Older drawing"><span class="grip" aria-hidden="true"></span><span class="cap" aria-hidden="true">›</span></button>
     </div>
 
     <div class="tools">

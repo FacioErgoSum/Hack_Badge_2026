@@ -1,14 +1,22 @@
 // Badge Sketches: the gallery of finished drawings plus a live slide.
 //
-// Slides run newest first: slides[0] is LIVE, slides[1] the newest drawing.
-// The left knob goes back in time (older), the right knob forward (newer).
+// Slides run newest first, left to right: slides[0] is LIVE, slides[1] the
+// newest drawing, the last one the oldest. The right knob steps back in time.
+//
+// The knobs turn with the pen like the badge's own: the left one drives x, the
+// right one y, PX_PER_REV pixels per turn, clockwise = right / up.
 (() => {
   "use strict";
+
+  const PX_PER_REV = 240;          // same as the badge firmware
+  const REPLAY_MS_PER_PX = 4;      // about one knob turn a second
+  const PEN = 8;                   // pen square, px
 
   const $ = (id) => document.getElementById(id);
   const line = $("line"), pen = $("pen"), empty = $("empty"), stamp = $("stamp"), count = $("count");
   const liveTag = $("live-tag"), statusEl = $("status"), statusText = $("status-text");
-  const prevBtn = $("prev"), nextBtn = $("next"), replayBtn = $("replay"), liveBtn = $("to-live");
+  const leftBtn = $("left"), rightBtn = $("right"), replayBtn = $("replay"), liveBtn = $("to-live");
+  const gripX = leftBtn.querySelector(".grip"), gripY = rightBtn.querySelector(".grip");
   const pngLink = $("png"), delBtn = $("delete");
   const admin = new URLSearchParams(location.search).has("admin");
 
@@ -17,7 +25,7 @@
   const cache = new Map();  // key -> {t, pts}
   let live = { id: "", pts: [], online: false, mode: "idle", seen: 0, seenText: "" };
   let shownPts = [];
-  let anim = 0;
+  let anim = 0, replayTimer = 0;
   let livePollTimer = 0;
 
   // --- Points --------------------------------------------------------------
@@ -36,45 +44,73 @@
   }
   const toAttr = (pts) => pts.map((p) => p[0] + "," + p[1]).join(" ");
 
+  // --- Pen and knobs ---------------------------------------------------------
+  function placePen(x, y, show) {
+    pen.setAttribute("x", x - PEN / 2);
+    pen.setAttribute("y", y - PEN / 2);
+    pen.setAttribute("visibility", show ? "visible" : "hidden");
+  }
+
+  // Knob angle from the pen position, measured from the middle of the screen.
+  // `smooth` lets CSS ease them there; replays set every frame and turn it off.
+  function turnKnobs(x, y, smooth) {
+    gripX.classList.toggle("turning", !smooth);
+    gripY.classList.toggle("turning", !smooth);
+    gripX.style.transform = `rotate(${((x - 480) * 360) / PX_PER_REV}deg)`;
+    gripY.style.transform = `rotate(${(-(y - 336) * 360) / PX_PER_REV}deg)`;
+  }
+
   function draw(pts, { showPen = false } = {}) {
     cancelAnimationFrame(anim);
+    clearTimeout(replayTimer);
     shownPts = pts;
     line.setAttribute("points", toAttr(pts));
-    if (showPen && pts.length) {
+    if (pts.length) {
       const [x, y] = pts[pts.length - 1];
-      pen.setAttribute("cx", x);
-      pen.setAttribute("cy", y);
-      pen.setAttribute("visibility", "visible");
+      placePen(x, y, showPen);
+      turnKnobs(x, y, true);
     } else {
-      pen.setAttribute("visibility", "hidden");
+      placePen(0, 0, false);
+      turnKnobs(480, 336, true);
     }
   }
 
+  // Redraw the line the way it was drawn, the pen moving at a steady speed
+  // along it and the knobs turning to match.
   function replay() {
     const pts = shownPts;
     if (pts.length < 2) return;
     cancelAnimationFrame(anim);
-    // Pace by path length so long drawings don't crawl or short ones blink
+    clearTimeout(replayTimer);
     let total = 0;
     const acc = [0];
     for (let i = 1; i < pts.length; i++) {
       total += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
       acc.push(total);
     }
-    const ms = Math.min(6000, Math.max(1200, total * 1.5));
-    const t0 = performance.now();
+    const ms = Math.min(15000, Math.max(1500, total * REPLAY_MS_PER_PX));
+    let t0 = 0;
+    let n = 1;
     const step = (now) => {
+      if (!t0) t0 = now;
       const want = Math.min(1, (now - t0) / ms) * total;
-      let n = 1;
-      while (n < pts.length && acc[n] <= want) n++;
-      const part = pts.slice(0, n);
-      line.setAttribute("points", toAttr(part));
-      const [x, y] = part[part.length - 1];
-      pen.setAttribute("cx", x); pen.setAttribute("cy", y); pen.setAttribute("visibility", "visible");
-      if (n < pts.length) anim = requestAnimationFrame(step);
-      else pen.setAttribute("visibility", "hidden");
+      while (n < pts.length - 1 && acc[n] < want) n++;
+      // The pen sits partway along segment n-1 -> n
+      const [ax, ay] = pts[n - 1], [bx, by] = pts[n];
+      const seg = acc[n] - acc[n - 1];
+      const f = seg > 0 ? Math.min(1, Math.max(0, (want - acc[n - 1]) / seg)) : 1;
+      const x = ax + (bx - ax) * f, y = ay + (by - ay) * f;
+      line.setAttribute("points", toAttr(pts.slice(0, n)) + ` ${x},${y}`);
+      placePen(x, y, true);
+      turnKnobs(x, y, false);
+      if (want < total) anim = requestAnimationFrame(step);
+      else draw(pts);
     };
-    anim = requestAnimationFrame(step);
+    // Wind the knobs back to where the drawing started, then go
+    placePen(pts[0][0], pts[0][1], true);
+    line.setAttribute("points", "");
+    turnKnobs(pts[0][0], pts[0][1], true);
+    replayTimer = setTimeout(() => (anim = requestAnimationFrame(step)), 450);
   }
 
   // --- API -----------------------------------------------------------------
@@ -156,12 +192,12 @@
     draw(live.pts, { showPen: live.online });
     empty.textContent = live.pts.length ? "" : live.online ? "Waiting for the knobs to turn…" : "The badge is offline";
     stamp.textContent = live.online ? "DRAWING NOW" : "LIVE VIEW";
-    count.textContent = keys.length ? "‹ " + keys.length + " in the gallery" : "";
+    count.textContent = keys.length ? keys.length + " IN THE GALLERY ›" : "";
   }
 
   async function render() {
-    prevBtn.disabled = index >= keys.length;
-    nextBtn.disabled = index <= 0;
+    leftBtn.disabled = index <= 0;
+    rightBtn.disabled = index >= keys.length;
     liveBtn.disabled = index === 0;
     delBtn.hidden = !admin || index === 0;
     pngLink.removeAttribute("href");
@@ -176,7 +212,7 @@
     liveTag.setAttribute("visibility", "hidden");
     const k = keys[index - 1];
     stamp.textContent = k.t.toUpperCase();
-    count.textContent = `${keys.length - index + 1} OF ${keys.length}`;
+    count.textContent = `${index} OF ${keys.length}`;
     empty.textContent = "";
     history.replaceState(null, "", "#" + k.key);
     try {
@@ -254,16 +290,16 @@
   });
 
   // --- Wiring ----------------------------------------------------------------
-  prevBtn.addEventListener("click", () => go(index + 1));
-  nextBtn.addEventListener("click", () => go(index - 1));
+  leftBtn.addEventListener("click", () => go(index - 1));    // newer
+  rightBtn.addEventListener("click", () => go(index + 1));   // older
   liveBtn.addEventListener("click", () => go(0));
   replayBtn.addEventListener("click", replay);
   document.addEventListener("keydown", (e) => {
-    if (e.key === "ArrowLeft") go(index + 1);
-    else if (e.key === "ArrowRight") go(index - 1);
+    if (e.key === "ArrowLeft") go(index - 1);
+    else if (e.key === "ArrowRight") go(index + 1);
   });
   document.addEventListener("visibilitychange", () => { if (!document.hidden) pollLive(); });
-  setInterval(() => loadKeys().then(() => { prevBtn.disabled = index >= keys.length; if (index === 0) renderLive(); }), 30000);
+  setInterval(() => loadKeys().then(() => { rightBtn.disabled = index >= keys.length; if (index === 0) renderLive(); }), 30000);
 
   (async () => {
     await Promise.all([loadKeys(), pollLive()]);
