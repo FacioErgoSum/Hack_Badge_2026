@@ -12,13 +12,17 @@
 //           pins (GPIO2/4/7) are probed with pull-down vs pull-up: a floating
 //           pin follows the pull, a driven one doesn't. First two = X, Y.
 //   Shake   optional MPU6050 on the SAO I2C bus (SDA 17, SCL 18), 0x68/0x69.
-//   LEDs    8x WS2812 on GPIO38: red while Sketch is running, yellow while
-//           you're drawing (knobs turning, or new lines being put on screen).
+//   LEDs    8x WS2812 on GPIO38: 0-3 follow the X knob (cyan), 4-7 the Y
+//           knob (magenta) - a dot spins the way you turn, and that side
+//           flashes red when the pen hits a wall. Off while the knobs are still.
 //
 // Refreshing
-//   The frame goes up once with EPD_SLOW (the only mode that makes good red).
-//   Lines and erases then use EPD_FAST_KEEP_RED, which drives black/white and
-//   leaves the red frame alone, with the COG session kept open between images.
+//   The Etch A Sketch frame (data/gallery/EtchASketch.png, baked into
+//   etch_frame.h) goes up once with EPD_SLOW, the only mode that makes good red.
+//   New lines go out with EPD_FAST_INK: only the pixels drawn since the last
+//   refresh are driven, so the rest of the panel doesn't flash. Erases use
+//   EPD_FAST_KEEP_RED, which drives black/white and leaves the red frame alone.
+//   The COG session is kept open between images.
 // -----------------------------------------------------------------------------
 #include <math.h>
 #include <stdbool.h>
@@ -36,6 +40,7 @@
 #include "esp_timer.h"
 
 #include "epd97.h"
+#include "etch_frame.h"
 #include "ws2812.h"
 
 // --- Tunables -----------------------------------------------------------------
@@ -43,14 +48,19 @@
 #define LINE_W            3       // line thickness, px
 #define DEADBAND          12      // ADC noise to ignore, counts of 4096
 #define ADC_SAMPLES       8
-#define IDLE_REFRESH_MS   700     // redraw this long after the knobs stop...
-#define MAX_WAIT_MS       4000    // ...or at least this often while drawing
-#define DRAWING_HOLD_MS   600     // LEDs stay yellow this long after a turn
+#define IDLE_REFRESH_MS   100     // redraw this long after the knobs stop...
+#define MAX_WAIT_MS       300     // ...or at least this often while drawing
+#define LED_TURN_HOLD_MS  400     // a knob's LEDs stay lit this long after a turn
+#define LED_WALL_MS       250     // ...and flash red this long when the pen hits a wall
+#define LED_DOT_STEPS     16      // dot steps per knob revolution
 #define SLEEP_AFTER_MS    30000   // power the panel down after this long idle
+#define CLEAN_EVERY_MS    300000  // full refresh to restore red and black, at most
+#define CLEAN_IDLE_MS     15000   // this often, once the knobs have rested this long
 #define LED_BRIGHTNESS    24      // of 255
 #define INVERT_X          0
 #define INVERT_Y          0
 #define SWAP_KNOBS        0
+#define FLIP_180          1       // badge held upside down: screen turned, knobs swapped
 
 #define SHAKE_G           2.2f    // a jolt is this far from 1 g
 #define SHAKE_PEAKS       4       // this many jolts...
@@ -63,20 +73,18 @@
 #define SAO_SDA      17
 #define SAO_SCL      18
 
-// --- Frame geometry (matches data/graphics/sketch_frame.png) ------------------
-#define SCR_X0  70
-#define SCR_Y0  58
-#define SCR_X1  890
-#define SCR_Y1  532
-#define SCR_R   18
-#define INSET   (12 + LINE_W)
+// --- Frame geometry (matches data/gallery/EtchASketch.png) -------------------
+// Largest all-white box inside the image's screen, clear of the rounded corners
+#define SCR_X0  132
+#define SCR_Y0  121
+#define SCR_X1  826
+#define SCR_Y1  524
+#define INSET   (LINE_W / 2 + 1)
 #define X_MIN   (SCR_X0 + INSET)
 #define Y_MIN   (SCR_Y0 + INSET)
 #define X_MAX   (SCR_X1 - INSET)
 #define Y_MAX   (SCR_Y1 - INSET)
-#define KNOB_Y  604
-#define KNOB_LX 98
-#define KNOB_RX (EPD_W - 98)
+#define STATUS_Y 590
 
 static inline uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
@@ -88,7 +96,6 @@ static volatile bool s_req_pending;
 static volatile bool s_req_sleep;
 static volatile epd_refresh_t s_req_mode;
 static volatile bool s_epd_busy;
-static volatile bool s_lines_in_flight;   // the refresh running is drawing lines
 
 static void epd_task(void* arg)
 {
@@ -106,7 +113,6 @@ static void epd_task(void* arg)
       epd_sleep();
     }
     s_epd_busy = false;
-    s_lines_in_flight = false;
   }
 }
 
@@ -128,25 +134,6 @@ static void request_sleep(void)
 // =============================================================================
 // Drawing
 // =============================================================================
-static void fill_round_rect(int x0, int y0, int x1, int y1, int r, epd_color_t c)
-{
-  for (int y = y0; y <= y1; y++) {
-    int dy = 0;
-    if (y < y0 + r)      dy = y0 + r - y;
-    else if (y > y1 - r) dy = y - (y1 - r);
-    int dx = dy ? r - (int)sqrtf((float)(r * r - dy * dy)) : 0;
-    epd_fill_rect(x0 + dx, y, (x1 - x0 + 1) - 2 * dx, 1, c);
-  }
-}
-
-static void fill_circle(int cx, int cy, int r, epd_color_t c)
-{
-  for (int dy = -r; dy <= r; dy++) {
-    int dx = (int)sqrtf((float)(r * r - dy * dy));
-    epd_fill_rect(cx - dx, cy + dy, 2 * dx + 1, 1, c);
-  }
-}
-
 static void stamp(int x, int y)
 {
   epd_fill_rect(x - LINE_W / 2, y - LINE_W / 2, LINE_W, LINE_W, EPD_BLACK);
@@ -166,34 +153,20 @@ static void draw_line(int x0, int y0, int x1, int y1)
   }
 }
 
-static void draw_knob(int cx, int cy)
-{
-  fill_circle(cx, cy, 50, EPD_BLACK);
-  fill_circle(cx, cy, 46, EPD_WHITE);
-  fill_circle(cx, cy, 35, EPD_BLACK);
-  fill_circle(cx, cy, 33, EPD_WHITE);
-  for (int k = 0; k < 24; k++) {          // grip ridges
-    float a = 2.0f * (float)M_PI * k / 24.0f;
-    for (int r = 38; r <= 44; r++) {
-      int x = cx + (int)lroundf(r * cosf(a)), y = cy + (int)lroundf(r * sinf(a));
-      epd_fill_rect(x, y, 2, 2, EPD_BLACK);
-    }
-  }
-}
-
+// Unpack the RLE'd frame: (count, byte) pairs over the bw plane, then red.
 static void draw_frame(const char* status)
 {
-  epd_clear();
-  fill_round_rect(4, 4, EPD_W - 5, EPD_H - 5, 48, EPD_BLACK);
-  fill_round_rect(7, 7, EPD_W - 8, EPD_H - 8, 45, EPD_RED);
-  fill_round_rect(SCR_X0 - 6, SCR_Y0 - 6, SCR_X1 + 6, SCR_Y1 + 6, SCR_R + 4, EPD_BLACK);
-  fill_round_rect(SCR_X0, SCR_Y0, SCR_X1, SCR_Y1, SCR_R, EPD_WHITE);
-  draw_knob(KNOB_LX, KNOB_Y);
-  draw_knob(KNOB_RX, KNOB_Y);
-  const char* title = "SKETCH";
-  epd_text((EPD_W - epd_text_width(title, 4)) / 2, 16, title, EPD_WHITE, 4);
+  uint8_t* bw = epd_plane_bw();
+  uint8_t* red = epd_plane_red();
+  size_t o = 0;
+  for (size_t i = 0; i < sizeof(k_etch_frame_rle); i += 2) {
+    for (int n = k_etch_frame_rle[i]; n > 0 && o < 2 * EPD_PLANE_BYTES; n--, o++) {
+      if (o < EPD_PLANE_BYTES) bw[o] = k_etch_frame_rle[i + 1];
+      else                     red[o - EPD_PLANE_BYTES] = k_etch_frame_rle[i + 1];
+    }
+  }
   if (status) {
-    epd_text((EPD_W - epd_text_width(status, 2)) / 2, 580, status, EPD_WHITE, 2);
+    epd_text((EPD_W - epd_text_width(status, 2)) / 2, STATUS_Y, status, EPD_WHITE, 2);
   }
 }
 
@@ -243,7 +216,9 @@ static bool knob_init(knob_t* k)
 }
 
 // A floating pin follows the internal pull; an AS5600 output holds its level.
-static bool knob_probe(knob_t* k)
+// With the output set to 10-90 % of VDD a knob never reads below ~330 mV, so
+// `min_mv` also rejects a pin that something on the board holds near ground.
+static bool knob_probe(knob_t* k, int min_mv)
 {
   gpio_set_pull_mode(k->gpio, GPIO_PULLDOWN_ONLY);
   vTaskDelay(pdMS_TO_TICKS(3));
@@ -252,7 +227,7 @@ static bool knob_probe(knob_t* k)
   vTaskDelay(pdMS_TO_TICKS(3));
   int hi = knob_mv(k, 8);
   gpio_set_pull_mode(k->gpio, GPIO_FLOATING);
-  bool driven = abs(hi - lo) < 300;
+  bool driven = abs(hi - lo) < 300 && lo >= min_mv && hi >= min_mv;
   printf("sketch: %s GPIO%d pulled down %d mV, up %d mV -> %s\n",
          k->name, k->gpio, lo, hi, driven ? "knob" : "nothing");
   return driven;
@@ -383,6 +358,45 @@ static bool button_pressed(button_t* b)
 }
 
 // =============================================================================
+// LEDs: a spinning dot per knob while it turns, red at a wall, off otherwise
+// =============================================================================
+// Indexed by axis (0 = X, 1 = Y). Each axis lights the four LEDs on its own
+// knob's side: 0-3 for the first knob found, 4-7 for the second.
+static float s_phase[2];            // dot position, in LED steps
+static uint32_t s_turn_ms[2], s_wall_ms[2];
+static int s_led_group[2] = { 0, 1 };
+
+static void leds_turned(int axis, int counts, uint32_t t)
+{
+  s_phase[axis] += counts * (float)LED_DOT_STEPS / 4096.0f;
+  s_turn_ms[axis] = t;
+}
+
+static void leds_update(uint32_t t)
+{
+  static uint8_t last[WS2812_COUNT][3];
+  static bool have_last;
+  uint8_t f[WS2812_COUNT][3] = { { 0 } };
+  for (int a = 0; a < 2; a++) {
+    uint8_t* side = f[s_led_group[a] * 4];
+    if (s_wall_ms[a] && t - s_wall_ms[a] < LED_WALL_MS) {
+      for (int i = 0; i < 4; i++) { side[i * 3] = 255; side[i * 3 + 1] = 0; side[i * 3 + 2] = 0; }
+    } else if (s_turn_ms[a] && t - s_turn_ms[a] < LED_TURN_HOLD_MS) {
+      int pos = (((int)floorf(s_phase[a])) % 4 + 4) % 4;
+      if (FLIP_180) pos = 3 - pos;   // the strip runs the other way too
+      uint8_t* q = f[s_led_group[a] * 4 + pos];
+      if (a == 0) { q[0] = 0;   q[1] = 255; q[2] = 255; }   // cyan
+      else        { q[0] = 255; q[1] = 0;   q[2] = 255; }   // magenta
+    }
+  }
+  if (have_last && memcmp(f, last, sizeof(f)) == 0) return;
+  memcpy(last, f, sizeof(f));
+  have_last = true;
+  for (int i = 0; i < WS2812_COUNT; i++) ws2812_set(i, f[i][0], f[i][1], f[i][2]);
+  ws2812_show();
+}
+
+// =============================================================================
 // App
 // =============================================================================
 static int s_px = (X_MIN + X_MAX) / 2, s_py = (Y_MIN + Y_MAX) / 2;
@@ -408,7 +422,7 @@ void app_main(void)
   printf("\n=== Sketch (ESP-IDF) ===\n");
   ws2812_init();
   ws2812_set_brightness(LED_BRIGHTNESS);
-  ws2812_fill(255, 0, 0);   // red: Sketch is running
+  ws2812_fill(0, 0, 0);
 
   gpio_config_t bc = {
     .pin_bit_mask = (1ULL << BTN_USER_A) | (1ULL << BTN_USER_B),
@@ -420,20 +434,27 @@ void app_main(void)
   // Knobs
   adc_oneshot_unit_init_cfg_t ucfg = { .unit_id = ADC_UNIT_1 };
   ESP_ERROR_CHECK(adc_oneshot_new_unit(&ucfg, &s_adc));
+  i2c_init();
+  int min_mv = 0;
+  if (as5600_reduced_range()) {
+    s_lo_mv = 330;
+    s_hi_mv = 2970;
+    min_mv = 250;
+    printf("sketch: AS5600 output set to 10-90 %% of VDD\n");
+    vTaskDelay(pdMS_TO_TICKS(5));   // let the outputs settle to the new range
+  }
   knob_t* found[2] = { NULL, NULL };
   int nfound = 0;
   for (int i = 0; i < 3 && nfound < 2; i++) {
-    if (knob_init(&s_cand[i]) && knob_probe(&s_cand[i])) found[nfound++] = &s_cand[i];
+    if (knob_init(&s_cand[i]) && knob_probe(&s_cand[i], min_mv)) found[nfound++] = &s_cand[i];
   }
-  i2c_init();
-  if (nfound && as5600_reduced_range()) {
-    s_lo_mv = 330;
-    s_hi_mv = 2970;
-    printf("sketch: AS5600 output set to 10-90 %% of VDD\n");
-  }
-  s_knob_x = found[SWAP_KNOBS ? 1 : 0];
-  s_knob_y = found[SWAP_KNOBS ? 0 : 1];
+  // Upside down, the first knob found ends up on the right, so it drives Y.
+  const bool swap = SWAP_KNOBS ^ FLIP_180;
+  s_knob_x = found[swap ? 1 : 0];
+  s_knob_y = found[swap ? 0 : 1];
   if (!s_knob_x) { s_knob_x = s_knob_y; s_knob_y = NULL; }
+  s_led_group[0] = (s_knob_x == found[0]) ? 0 : 1;
+  s_led_group[1] = 1 - s_led_group[0];
   printf("sketch: X knob %s, Y knob %s\n",
          s_knob_x ? s_knob_x->name : "-", s_knob_y ? s_knob_y->name : "-");
   mpu_init();
@@ -444,13 +465,13 @@ void app_main(void)
     ws2812_fill(255, 0, 255);
     return;
   }
+  epd_set_rotate_180(FLIP_180);
   epd_set_keep_awake(true);   // lines then cost planes + trigger, not a power-up
   xTaskCreatePinnedToCore(epd_task, "epd", 8192, NULL, 5, &s_epd_task, 1);
   erase(EPD_SLOW);            // full refresh: clears the panel and makes good red
 
-  bool dirty = false;
-  uint32_t first_change = 0, last_move = 0, last_activity = now_ms();
-  int led_state = -1;
+  bool dirty = false, drawn_since_clean = false;
+  uint32_t first_change = 0, last_move = 0, last_activity = now_ms(), last_clean = now_ms();
 
   for (;;) {
     uint32_t t = now_ms();
@@ -461,7 +482,6 @@ void app_main(void)
         ws2812_fill(255, 255, 255); vTaskDelay(pdMS_TO_TICKS(80));
         ws2812_fill(0, 0, 0);       vTaskDelay(pdMS_TO_TICKS(80));
       }
-      led_state = -1;
       erase(EPD_FAST_KEEP_RED);
       dirty = false;
       last_activity = t;
@@ -478,6 +498,8 @@ void app_main(void)
       } else {
         request_refresh(EPD_SLOW);   // full clean-up of the current drawing
         dirty = false;
+        drawn_since_clean = false;
+        last_clean = t;
       }
       last_activity = t;
     }
@@ -493,6 +515,8 @@ void app_main(void)
     }
     if (INVERT_X) cx = -cx;
     if (INVERT_Y) cy = -cy;
+    if (cx) leds_turned(0, cx, t);
+    if (cy) leds_turned(1, cy, t);
     if (cx || cy) {
       last_move = t;
       last_activity = t;
@@ -502,8 +526,8 @@ void app_main(void)
       s_fx -= mx;
       s_fy -= my;
       int nx = s_px + mx, ny = s_py + my;
-      if (nx < X_MIN || nx > X_MAX) { s_fx = 0; nx = nx < X_MIN ? X_MIN : X_MAX; }
-      if (ny < Y_MIN || ny > Y_MAX) { s_fy = 0; ny = ny < Y_MIN ? Y_MIN : Y_MAX; }
+      if (nx < X_MIN || nx > X_MAX) { s_fx = 0; nx = nx < X_MIN ? X_MIN : X_MAX; s_wall_ms[0] = t; }
+      if (ny < Y_MIN || ny > Y_MAX) { s_fy = 0; ny = ny < Y_MIN ? Y_MIN : Y_MAX; s_wall_ms[1] = t; }
       if (nx != s_px || ny != s_py) {
         draw_line(s_px, s_py, nx, ny);
         s_px = nx;
@@ -516,9 +540,20 @@ void app_main(void)
     // Put new lines on the panel once the knobs pause
     if (dirty && !s_epd_busy && !s_req_pending &&
         (t - last_move >= IDLE_REFRESH_MS || t - first_change >= MAX_WAIT_MS)) {
-      s_lines_in_flight = true;
-      request_refresh(EPD_FAST_KEEP_RED);
+      request_refresh(EPD_FAST_INK);
       dirty = false;
+      drawn_since_clean = true;
+    }
+
+    // Every few minutes of drawing, once the knobs rest: one full refresh.
+    // Fast line updates leave red and black a little weaker each time.
+    if (drawn_since_clean && !dirty && !s_epd_busy && !s_req_pending &&
+        t - last_clean >= CLEAN_EVERY_MS && t - last_move >= CLEAN_IDLE_MS) {
+      printf("sketch: periodic full refresh\n");
+      request_refresh(EPD_SLOW);
+      drawn_since_clean = false;
+      last_clean = t;
+      last_activity = t;
     }
 
     // Long idle: let the panel's rails come down
@@ -528,13 +563,7 @@ void app_main(void)
       last_activity = t;
     }
 
-    // LEDs: yellow while drawing, red otherwise
-    bool drawing = (t - last_move < DRAWING_HOLD_MS) || dirty || s_lines_in_flight;
-    if ((int)drawing != led_state) {
-      led_state = drawing;
-      if (drawing) ws2812_fill(255, 160, 0);
-      else         ws2812_fill(255, 0, 0);
-    }
+    leds_update(t);
 
     vTaskDelay(pdMS_TO_TICKS(10));
   }

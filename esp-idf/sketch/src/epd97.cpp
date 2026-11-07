@@ -86,6 +86,7 @@ static const upd_step_t k_upd[] = {
 // -----------------------------------------------------------------------------
 static uint8_t*  s_bw;
 static uint8_t*  s_red;
+static uint8_t*  s_shown;    // the bw plane as last put on the panel
 static bool      s_ready;
 
 static spi_device_handle_t s_spi;
@@ -110,6 +111,8 @@ static uint8_t   s_lut8[LUT8_BYTES];
 static uint8_t   s_lutb[LUTB_BYTES];
 static uint8_t   s_lut8_keep[LUT8_BYTES];   // EPD_FAST_KEEP_RED tables
 static uint8_t   s_lutb_keep[LUTB_BYTES];
+static uint8_t   s_lut8_ink[LUT8_BYTES];    // EPD_FAST_INK tables
+static uint8_t   s_lutb_ink[LUTB_BYTES];
 static bool      s_lut8_has_red;
 
 static bool      s_frame_has_red;
@@ -126,6 +129,7 @@ static bool      s_lut_latched;
 static epd_refresh_t s_latched_mode = EPD_SLOW;
 static uint32_t  s_session_images;
 static bool      s_keep_awake;
+static bool      s_rot180;
 
 static uint32_t  s_power_off_ms;
 static bool      s_power_off_valid;
@@ -466,6 +470,14 @@ static int cog_initial(void)
 // -----------------------------------------------------------------------------
 // Plane transfer
 // -----------------------------------------------------------------------------
+static inline uint8_t rev8(uint8_t b)
+{
+  b = (uint8_t)((b & 0xF0u) >> 4 | (b & 0x0Fu) << 4);
+  b = (uint8_t)((b & 0xCCu) >> 2 | (b & 0x33u) << 2);
+  b = (uint8_t)((b & 0xAAu) >> 1 | (b & 0x55u) << 1);
+  return b;
+}
+
 // `orsrc`, when given, is merged in bit by bit. That is how a fast refresh
 // draws red as ink: the red plane is OR'ed into the black one on the way out
 // and the red plane itself goes out empty.
@@ -491,6 +503,8 @@ static void write_plane(uint8_t index, const uint8_t* fb, const uint8_t* orfb)
 {
   static const uint8_t zeros[HALF_BYTES] = { 0 };
 
+  static uint8_t line_buf[EPD_STRIDE];
+
   if (index == 0x10) {
     // Driver B sets DCTL before the window registers, exactly as its stock
     // trace does; driver 8 sends 0x01 at the end of the update sequence.
@@ -511,12 +525,28 @@ static void write_plane(uint8_t index, const uint8_t* fb, const uint8_t* orfb)
 
   bus_spi();
   for (int y = 0; y < EPD_H; y++) {
+    if (!fb) {
+      spi_half(COG_M, zeros, NULL);
+      spi_half(COG_S, zeros, NULL);
+      continue;
+    }
+    if (s_rot180) {
+      // Upside down: the last framebuffer line first, each one back to front.
+      const size_t off = (size_t)(EPD_H - 1 - y) * EPD_STRIDE;
+      for (int j = 0; j < EPD_STRIDE; j++) {
+        uint8_t v = fb[off + EPD_STRIDE - 1 - j];
+        if (orfb) v |= orfb[off + EPD_STRIDE - 1 - j];
+        line_buf[j] = rev8(v);
+      }
+      spi_half(COG_M, line_buf, NULL);
+      spi_half(COG_S, line_buf + HALF_BYTES, NULL);
+      continue;
+    }
     const size_t off = (size_t)y * EPD_STRIDE;
-    const uint8_t* line = fb   ? (fb + off)   : zeros;
+    const uint8_t* line = fb + off;
     const uint8_t* orl  = orfb ? (orfb + off) : NULL;
     spi_half(COG_M, line, orl);
-    spi_half(COG_S, fb ? (line + HALF_BYTES) : zeros,
-                    orl ? (orl + HALF_BYTES) : NULL);
+    spi_half(COG_S, line + HALF_BYTES, orl ? (orl + HALF_BYTES) : NULL);
   }
   bus_bitbang();
   cs_hi();
@@ -622,6 +652,9 @@ static int do_refresh(epd_refresh_t mode, bool need_red_lut)
   if (mode == EPD_FAST_KEEP_RED) {
     if (s_driver_b) send_index(0xB0, s_lutb_keep, (uint16_t)LUTB_BYTES);
     else            send_index(0xB0, s_lut8_keep, (uint16_t)LUT8_BYTES);
+  } else if (mode == EPD_FAST_INK) {
+    if (s_driver_b) send_index(0xB0, s_lutb_ink, (uint16_t)LUTB_BYTES);
+    else            send_index(0xB0, s_lut8_ink, (uint16_t)LUT8_BYTES);
   } else if (mode == EPD_FAST) {
     if (s_driver_b) {
       send_index(0xB0, s_lutb, (uint16_t)LUTB_BYTES);
@@ -703,8 +736,10 @@ bool epd_begin(void)
   printf("epd: 9.7\" iTC, %ux%u, planes %u bytes each\n",
                 EPD_W, EPD_H, (unsigned)EPD_PLANE_BYTES);
 
-  s_bw  = (uint8_t*)heap_caps_malloc(EPD_PLANE_BYTES, MALLOC_CAP_SPIRAM);
-  s_red = (uint8_t*)heap_caps_malloc(EPD_PLANE_BYTES, MALLOC_CAP_SPIRAM);
+  s_bw    = (uint8_t*)heap_caps_malloc(EPD_PLANE_BYTES, MALLOC_CAP_SPIRAM);
+  s_red   = (uint8_t*)heap_caps_malloc(EPD_PLANE_BYTES, MALLOC_CAP_SPIRAM);
+  // Only EPD_FAST_INK needs this; without it that mode falls back to KEEP_RED.
+  s_shown = (uint8_t*)heap_caps_calloc(1, EPD_PLANE_BYTES, MALLOC_CAP_SPIRAM);
   if (!s_bw || !s_red) {
     // No PSRAM: 161 kB of internal RAM is a squeeze but not impossible.
     LOGF("epd: no PSRAM, falling back to internal RAM\n");
@@ -779,9 +814,15 @@ bool epd_begin(void)
   epd_build_lut8(s_lut8, false, false);
   epd_build_lutb(s_lutb);
   epd_build_lut8(s_lut8_keep, false, false);
-  epd_idle_red_tables(s_lut8_keep, 9u, 4u);
+  epd_idle_tables(s_lut8_keep, 9u, 4u, 0x0Cu);
   epd_build_lutb(s_lutb_keep);
-  epd_idle_red_tables(s_lutb_keep, 10u, 8u);
+  epd_idle_tables(s_lutb_keep, 10u, 8u, 0x0Cu);
+  epd_build_lut8(s_lut8_ink, false, false);
+  epd_idle_tables(s_lut8_ink, 9u, 4u, 0x0Du);
+  epd_build_lutb(s_lutb_ink);
+  epd_idle_tables(s_lutb_ink, 10u, 8u, 0x0Du);
+  epd_idle_shake(s_lut8_ink, 9u, 4u, 1u, 1u);
+  epd_idle_shake(s_lutb_ink, 10u, 8u, (unsigned)EPD_B_INK_TABLE, (unsigned)EPD_B_SHAKE_GROUPS);
 
   // One power-up to find out what is attached, unless a previous wake already
   // answered that. The OTP is cached from here on either way.
@@ -795,6 +836,9 @@ bool epd_begin(void)
   }
   s_ready = true;
   LOGF("epd: ready, panel %s\n", epd_panel_name());
+  LOGF("epd: OTP VCOM 0x%02X, DUW %02X %02X %02X %02X %02X %02X, DRFW %02X %02X %02X %02X, RAM_RW %02X %02X %02X\n",
+       s_otp[0x11], s_otp[0x16], s_otp[0x17], s_otp[0x18], s_otp[0x19], s_otp[0x1A], s_otp[0x1B],
+       s_otp[0x0C], s_otp[0x0D], s_otp[0x0E], s_otp[0x0F], s_otp[0x13], s_otp[0x14], s_otp[0x15]);
   return true;
 }
 
@@ -806,14 +850,35 @@ bool refresh_display(epd_refresh_t mode)
   }
   const uint32_t t_frame = millis();
 
+  if (mode == EPD_FAST_INK && !s_shown) mode = EPD_FAST_KEEP_RED;
+  const bool ink_only = (mode == EPD_FAST_INK);
+  if (ink_only) {
+    // Skip the refresh when no pixel has gone black since the last one.
+    const uint32_t* bw = (const uint32_t*)s_bw;
+    uint32_t* shown = (uint32_t*)s_shown;
+    uint32_t any = 0;
+    for (size_t i = 0; i < EPD_PLANE_BYTES / 4; i++) {
+      any |= bw[i] & ~shown[i];
+      shown[i] |= bw[i];
+    }
+    if (!any) {
+      VLOGF("epd: no new ink, nothing to refresh\n");
+      s_last_frame_ms = 0;
+      return true;
+    }
+  }
+
   const bool have_red = frame_has_red();
   const bool keep_red = (mode == EPD_FAST_KEEP_RED);
   // Red is a slow-refresh colour - see EPD_FAST_ALLOW_RED. Whether it is drawn
   // follows what the CALLER asked for, not the waveform actually used below.
   // EPD_FAST_KEEP_RED sends the real red plane, but its red tables are idle, so
   // red pixels are left exactly as a slow refresh put them.
-  const bool draw_red = have_red && (mode == EPD_SLOW || keep_red || EPD_FAST_ALLOW_RED);
-  s_frame_has_red = draw_red;
+  const bool draw_red = !ink_only && have_red &&
+                        (mode == EPD_SLOW || keep_red || EPD_FAST_ALLOW_RED);
+  // EPD_FAST_INK leaves red exactly where it was, so what the panel holds
+  // doesn't change.
+  s_frame_has_red = ink_only ? s_prev_has_red : draw_red;
 
   // Red already on the panel has to be driven off by a full refresh. Giving the
   // short waveform a few clearing groups is not enough - measured on the panel,
@@ -863,8 +928,21 @@ bool refresh_display(epd_refresh_t mode)
           (unsigned)s_session_images + 1u);
   }
 
-  write_plane(0x10, s_bw, (have_red && !draw_red) ? s_red : NULL);
-  write_plane(0x13, draw_red ? s_red : NULL, NULL);
+  if (ink_only) {
+    // The real picture: red pixels land on the idle red table, ink - old and
+    // new - on the ink table, which only ever pushes towards black.
+    write_plane(0x10, s_bw, NULL);
+    write_plane(0x13, s_red, NULL);
+  } else {
+    write_plane(0x10, s_bw, (have_red && !draw_red) ? s_red : NULL);
+    write_plane(0x13, draw_red ? s_red : NULL, NULL);
+    if (s_shown) {
+      memcpy(s_shown, s_bw, EPD_PLANE_BYTES);
+      if (have_red && !draw_red) {
+        for (size_t i = 0; i < EPD_PLANE_BYTES; i++) s_shown[i] |= s_red[i];
+      }
+    }
+  }
 
   // The first image of a session goes through the full sequence, which is what
   // latches the waveform. Later images only need the planes and a trigger:
@@ -876,9 +954,10 @@ bool refresh_display(epd_refresh_t mode)
   // whatever the table asks for, so a single pass cannot carry enough dose to
   // clear the previous frame; on the 084 the duration follows the table and
   // repeating it only multiplies the time.
-  const bool fast_drive = (drive == EPD_FAST || drive == EPD_FAST_KEEP_RED);
+  const bool fast_drive = (drive == EPD_FAST || drive == EPD_FAST_KEEP_RED || ink_only);
+  const unsigned pulls = ink_only ? (unsigned)EPD_B_INK_PULLS : (unsigned)EPD_B_REFRESH_PULLS;
   if (rc == 0 && fast_drive && s_driver_b) {
-    for (unsigned pull = 1; rc == 0 && pull < (unsigned)EPD_B_REFRESH_PULLS; pull++) {
+    for (unsigned pull = 1; rc == 0 && pull < pulls; pull++) {
       rc = retrigger();
     }
   }
@@ -899,11 +978,12 @@ bool refresh_display(epd_refresh_t mode)
   s_last_frame_ms = millis() - t_frame;
   LOGF("epd: %s refresh %s - panel %u ms, frame %u ms, red %s%s\n",
        (drive == mode) ? (drive == EPD_SLOW ? "slow"
-                          : (drive == EPD_FAST_KEEP_RED ? "fast (keep red)" : "fast"))
+                          : drive == EPD_FAST_KEEP_RED ? "fast (keep red)"
+                          : drive == EPD_FAST_INK ? "fast (new ink only)" : "fast")
                        : "slow (promoted)",
        rc == 0 ? "done" : "FAILED",
        (unsigned)s_last_panel_ms, (unsigned)s_last_frame_ms,
-       draw_red ? "drawn" : (have_red ? "as ink" : "none"),
+       ink_only ? "idle" : draw_red ? "drawn" : (have_red ? "as ink" : "none"),
        keep ? ", COG kept up" : "");
   return rc == 0;
 }
@@ -935,6 +1015,7 @@ void epd_deep_sleep_prepare(void)
   LOGF("epd: supply latched off, panel ready for deep sleep\n");
 }
 
+void epd_set_rotate_180(bool on) { s_rot180 = on; }
 void epd_set_keep_awake(bool on) { s_keep_awake = on; }
 bool epd_keep_awake(void)        { return s_keep_awake; }
 

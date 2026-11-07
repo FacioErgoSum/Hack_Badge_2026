@@ -59,7 +59,7 @@
 // Bulk plane data only. Register writes and the OTP readback stay bitbanged:
 // they are a few dozen bytes and the OTP wants a ~50 kHz clock.
 #ifndef EPD_SPI_HZ
-#define EPD_SPI_HZ        4000000u
+#define EPD_SPI_HZ        8000000u   // what the MicroPython driver ran this panel at
 #endif
 
 // --- Timing ------------------------------------------------------------------
@@ -119,7 +119,7 @@
 // OTP and its latched waveform, so an image costs its plane data plus the
 // refresh instead of a full power-up. Bounded rather than open-ended.
 #ifndef EPD_SESSION_IMAGES
-#define EPD_SESSION_IMAGES 20
+#define EPD_SESSION_IMAGES 200
 #endif
 
 // Whether a fast refresh may drive the third colour.
@@ -256,6 +256,12 @@
 // Three pulls of the already-latched waveform, no plane data resent.
 #ifndef EPD_B_REFRESH_PULLS
 #define EPD_B_REFRESH_PULLS 3
+#endif
+// EPD_FAST_INK only takes white to black - no previous frame to clear - and
+// every later update drives the same ink again, so a line that comes up grey
+// darkens on the next one. Each pull is another ~1.2 s.
+#ifndef EPD_B_INK_PULLS
+#define EPD_B_INK_PULLS 1
 #endif
 
 // --- Logging -----------------------------------------------------------------

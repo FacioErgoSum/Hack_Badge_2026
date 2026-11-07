@@ -55,10 +55,16 @@ extern "C" {
 //             EPD_FAST; red pixels get no drive at all, so red put up by an
 //             EPD_SLOW refresh stays as it is instead of fading or being
 //             drawn as ink. For drawing black over a red/white layout.
+//   EPD_FAST_INK  (also badge Sketch) for adding lines. Ink is pushed towards
+//             black with no shake, so lines already there stay put; the paper
+//             and red tables are idle, so white and red get no drive. Skipped
+//             when nothing went black since the last refresh. Can't erase:
+//             black to white needs one of the modes above.
 typedef enum {
   EPD_FAST = 0,
   EPD_SLOW = 1,
-  EPD_FAST_KEEP_RED = 2
+  EPD_FAST_KEEP_RED = 2,
+  EPD_FAST_INK = 3
 } epd_refresh_t;
 
 typedef enum {
@@ -116,6 +122,11 @@ void epd_deep_sleep_prepare(void);
 // EPD_SESSION_IMAGES images either way.
 void epd_set_keep_awake(bool on);
 bool epd_keep_awake(void);
+
+// Turn the picture 180 degrees on its way to the panel. The framebuffer and
+// the drawing calls stay in the viewer's coordinates. Set it before drawing
+// the first image.
+void epd_set_rotate_180(bool on);
 
 // -----------------------------------------------------------------------------
 // What is attached, and what the last refresh cost

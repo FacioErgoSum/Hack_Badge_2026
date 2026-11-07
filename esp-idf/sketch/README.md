@@ -6,7 +6,8 @@ replaces MicroPython on the badge (see "Going back to MicroPython" below).
 - Left knob moves the pen left/right, right knob up/down (clockwise = right/up)
 - **User A** or a hard **shake** erases
 - **User B** does a full refresh to clean up ghosting (with one knob: switches its axis)
-- **LEDs**: red while Sketch is running, yellow while you're drawing
+- **LEDs**: 0-3 follow the X knob (cyan), 4-7 the Y knob (magenta) as a dot
+  spinning the way you turn; red when the pen hits a wall; off when idle
 
 ## Hardware
 

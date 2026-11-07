@@ -198,19 +198,33 @@ static inline uint8_t red_level_b(unsigned g)
            : (uint8_t)EPD_B_RED_LEVEL;
 }
 
-// EPD_FAST_KEEP_RED: the red tables (2, and the unreachable 3) become idle
-// groups - ground for one frame, the same filler the tables already use - so a
-// red pixel gets no drive and keeps whatever a slow refresh put there. VCOM
-// (table 4) is already at ground. Works on either layout: `groups` per table,
-// `bytes` per group. Driver 8 idle groups need their frame-count bytes too,
-// since a group of all zeros runs about four seconds rather than not at all.
-static inline void epd_idle_red_tables(uint8_t* out, unsigned groups, unsigned bytes)
+// Turn whole tables (bit t of `tables` = table t) into idle groups - ground for
+// one frame, the same filler the tables already use - so their pixels get no
+// drive and keep whatever is on the film. VCOM (table 4) is already at ground.
+//   EPD_FAST_KEEP_RED  idles 2 and 3: red stays as a slow refresh put it.
+//   EPD_FAST_INK       idles 0, 2 and 3: only the ink table drives.
+// Works on either layout: `groups` per table, `bytes` per group. Driver 8 idle
+// groups need their frame-count bytes too, since a group of all zeros runs
+// about four seconds rather than not at all.
+static inline void epd_idle_tables(uint8_t* out, unsigned groups, unsigned bytes, unsigned tables)
 {
   const uint8_t* idle = &out[(4u * groups + groups - 1u) * bytes];   // VCOM's last group
-  for (unsigned t = 2u; t <= 3u; t++) {
+  for (unsigned t = 0u; t <= 3u; t++) {
+    if (!(tables & (1u << t))) continue;
     for (unsigned g = 0; g < groups; g++) {
       memcpy(&out[(t * groups + g) * bytes], idle, bytes);
     }
+  }
+}
+
+// EPD_FAST_INK: the ink table's shake groups idle too. The shake rocks a pixel
+// both ways, which is a visible flicker on lines that are already black.
+static inline void epd_idle_shake(uint8_t* out, unsigned groups, unsigned bytes,
+                                  unsigned table, unsigned shake_groups)
+{
+  const uint8_t* idle = &out[(4u * groups + groups - 1u) * bytes];
+  for (unsigned g = 0; g < shake_groups; g++) {
+    memcpy(&out[(table * groups + g) * bytes], idle, bytes);
   }
 }
 
