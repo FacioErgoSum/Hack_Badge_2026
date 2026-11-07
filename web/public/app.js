@@ -239,7 +239,7 @@
     g.beginPath();
     shownPts.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
     g.stroke();
-    g.fillStyle = "#fff"; g.font = "700 30px system-ui, sans-serif"; g.textAlign = "center";
+    g.fillStyle = "#fff"; g.font = "800 34px Inter, sans-serif"; g.textAlign = "center";
     g.fillText(stamp.textContent, 480, 606);
     return new Promise((resolve) => c.toBlob(resolve, "image/png"));
   }

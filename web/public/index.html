@@ -5,9 +5,57 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Hack-A-Sketch</title>
   <meta name="description" content="Hack-A-Sketch: everything drawn on Geoff's Supercon 2026 badge, with a live view of the one being drawn now.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;600;800&display=swap">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <svg class="defs" aria-hidden="true" focusable="false">
+    <defs>
+      <!-- Worn print. 1: blur the letter shapes and push noise into their edges, then
+           snap back to hard alpha, so the outlines go ragged. 2: fine specks of
+           missing ink, kept only where a slow noise says the print is worn, so it
+           wears in patches instead of evenly. 3: the original colour, clipped to it. -->
+      <filter id="grit" x="-4%" y="-10%" width="108%" height="120%" color-interpolation-filters="sRGB">
+        <feGaussianBlur in="SourceAlpha" stdDeviation="1" result="soft"/>
+        <feTurbulence type="fractalNoise" baseFrequency="0.35" numOctaves="4" seed="8"/>
+        <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  1 0 0 0 0" result="rough"/>
+        <feComposite in="soft" in2="rough" operator="arithmetic" k2="1" k3="0.75" k4="-0.38"/>
+        <feComponentTransfer result="edge"><feFuncA type="linear" slope="9" intercept="-4"/></feComponentTransfer>
+        <feTurbulence type="fractalNoise" baseFrequency="0.5" numOctaves="3" seed="15"/>
+        <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  1 0 0 0 0"/>
+        <feComponentTransfer result="specks"><feFuncA type="linear" slope="14" intercept="-10.2"/></feComponentTransfer>
+        <feTurbulence type="fractalNoise" baseFrequency="0.015" numOctaves="2" seed="27"/>
+        <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  1 0 0 0 0"/>
+        <feComponentTransfer result="worn"><feFuncA type="linear" slope="6" intercept="-2.8"/></feComponentTransfer>
+        <feComposite in="specks" in2="worn" operator="in" result="holes"/>
+        <feComposite in="edge" in2="holes" operator="out" result="ink"/>
+        <feMorphology in="SourceGraphic" operator="dilate" radius="1" result="spread"/>
+        <feMerge><feMergeNode in="spread"/><feMergeNode in="SourceGraphic"/></feMerge>
+        <feComposite in2="ink" operator="in"/>
+      </filter>
+      <!-- The same, finer, for small text -->
+      <filter id="grit-sm" x="-4%" y="-15%" width="108%" height="130%" color-interpolation-filters="sRGB">
+        <feGaussianBlur in="SourceAlpha" stdDeviation="0.5" result="soft"/>
+        <feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" seed="4"/>
+        <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  1 0 0 0 0" result="rough"/>
+        <feComposite in="soft" in2="rough" operator="arithmetic" k2="1" k3="0.45" k4="-0.22"/>
+        <feComponentTransfer result="edge"><feFuncA type="linear" slope="7" intercept="-3"/></feComponentTransfer>
+        <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" seed="6"/>
+        <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  1 0 0 0 0"/>
+        <feComponentTransfer result="specks"><feFuncA type="linear" slope="14" intercept="-10.5"/></feComponentTransfer>
+        <feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="31"/>
+        <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  1 0 0 0 0"/>
+        <feComponentTransfer result="worn"><feFuncA type="linear" slope="6" intercept="-2.8"/></feComponentTransfer>
+        <feComposite in="specks" in2="worn" operator="in" result="holes"/>
+        <feComposite in="edge" in2="holes" operator="out" result="ink"/>
+        <feMorphology in="SourceGraphic" operator="dilate" radius="0.6" result="spread"/>
+        <feMerge><feMergeNode in="spread"/><feMergeNode in="SourceGraphic"/></feMerge>
+        <feComposite in2="ink" operator="in"/>
+      </filter>
+    </defs>
+  </svg>
   <header>
     <h1>Hack-A-Sketch</h1>
     <div id="status" class="status" data-state="unknown" role="status">

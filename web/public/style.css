@@ -1,8 +1,8 @@
 :root {
   /* Dark, Hackaday-style: near-black page, light text, a yellow accent */
   color-scheme: dark;
-  --bg: #161616;
-  --ink: #f2f2f2;
+  --bg: #232323;
+  --ink: #ecebe6;
   --muted: #9a9a9a;
   --card: #222;
   --line: #3b3b3b;
@@ -18,7 +18,9 @@ html, body { margin: 0; }
 body {
   background: var(--bg);
   color: var(--ink);
-  font: 16px/1.5 ui-rounded, "SF Pro Rounded", system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--bg) url("paper.webp") repeat;
+  background-size: 768px 768px;
+  font: 16px/1.5 Inter, "Helvetica Neue", Helvetica, Arial, sans-serif;
   min-height: 100vh;
 }
 
@@ -32,12 +34,22 @@ header {
   gap: 12px;
   flex-wrap: wrap;
 }
-h1 { font-size: 1.7rem; margin: 0; letter-spacing: -0.01em; }
+h1 {
+  margin: 0;
+  font: 800 clamp(2rem, 5.5vw, 3.4rem)/0.9 Inter, "Helvetica Neue", Helvetica, Arial, sans-serif;
+  letter-spacing: -0.055em;
+  text-transform: uppercase;
+  color: var(--ink);
+  filter: url(#grit);
+}
+.defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+:root { --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace; }
 
 .status {
   display: inline-flex; align-items: center; gap: 8px;
   padding: 6px 12px; border-radius: 999px;
-  background: var(--pill-bg); color: var(--muted); font-size: 0.9rem;
+  background: var(--pill-bg); color: var(--muted);
+  font: 500 0.8rem/1.4 var(--mono); letter-spacing: 0.06em; text-transform: uppercase;
 }
 .status .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--off); }
 .status[data-state="online"] { color: var(--ink); }
@@ -65,12 +77,12 @@ main { max-width: 1000px; margin: 0 auto; padding: 0 16px 40px; }
 
 #line { stroke: var(--line); }
 #pen { fill: var(--accent); }
-#empty { fill: #9a9a9a; font: 600 26px system-ui, sans-serif; }
-#stamp { fill: #fff; font: 700 30px system-ui, sans-serif; letter-spacing: 0.06em; }
-#count { fill: rgba(255, 255, 255, 0.8); font: 600 20px system-ui, sans-serif; letter-spacing: 0.08em; }
+#empty { fill: #9a9a9a; font: 500 24px "IBM Plex Mono", monospace; }
+#stamp { fill: #fff; font: 800 34px Inter, sans-serif; letter-spacing: -0.02em; text-transform: uppercase; filter: url(#grit); }
+#count { fill: rgba(255, 255, 255, 0.85); font: 500 18px "IBM Plex Mono", monospace; letter-spacing: 0.08em; filter: url(#grit-sm); }
 #live-tag rect { fill: var(--accent); }
 #live-tag circle { fill: #fff; animation: blink 1.2s steps(2) infinite; }
-#live-tag text { fill: #fff; font: 800 17px system-ui, sans-serif; letter-spacing: 0.1em; }
+#live-tag text { fill: #fff; font: 600 16px "IBM Plex Mono", monospace; letter-spacing: 0.08em; }
 @keyframes blink { 50% { opacity: 0.2; } }
 
 /* The knobs double as the arrows. The ridged grip turns with the pen (left =
@@ -110,7 +122,7 @@ main { max-width: 1000px; margin: 0 auto; padding: 0 16px 40px; }
   background: radial-gradient(circle at 38% 30%, #ffffff, #efede9 55%, #d6d1c9);
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3), inset 0 -2px 4px rgba(0, 0, 0, 0.12);
   color: #b30016;
-  font: 700 clamp(20px, 4.2vw, 42px)/1 system-ui, sans-serif;
+  font: 800 clamp(20px, 4.2vw, 42px)/1 Inter, sans-serif;
 }
 .knob:hover:not(:disabled) { transform: scale(1.04); }
 .knob:active:not(:disabled) { transform: scale(0.96); }
@@ -122,7 +134,7 @@ main { max-width: 1000px; margin: 0 auto; padding: 0 16px 40px; }
 .pill {
   border: 0; border-radius: 999px; padding: 8px 16px;
   background: var(--pill-bg); color: var(--ink);
-  font: inherit; font-size: 0.95rem; cursor: pointer; text-decoration: none;
+  font: 500 0.8rem/1.4 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer; text-decoration: none;
 }
 .pill:hover { filter: brightness(1.25); }
 .pill:disabled { opacity: 0.5; cursor: default; }
@@ -136,9 +148,8 @@ main { max-width: 1000px; margin: 0 auto; padding: 0 16px 40px; }
 .icon:hover { filter: brightness(1.25); }
 .icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .icon svg .fill { fill: currentColor; stroke: none; }
-.hint { text-align: center; color: var(--muted); font-size: 0.85rem; margin-top: 14px; }
+.hint { text-align: center; color: var(--muted); font: 400 0.78rem/1.5 var(--mono); margin-top: 14px; }
 
 @media (max-width: 520px) {
   header { padding-top: 18px; }
-  h1 { font-size: 1.3rem; }
 }
