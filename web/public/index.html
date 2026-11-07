@@ -54,6 +54,45 @@
         <feMerge><feMergeNode in="spread"/><feMergeNode in="SourceGraphic"/></feMerge>
         <feComposite in2="ink" operator="in"/>
       </filter>
+      <!-- The two above plus a soft shadow, for text on the red frame -->
+      <filter id="grit-shadow" x="-4%" y="-25%" width="108%" height="160%" color-interpolation-filters="sRGB">
+        <feGaussianBlur in="SourceAlpha" stdDeviation="1" result="soft"/>
+        <feTurbulence type="fractalNoise" baseFrequency="0.35" numOctaves="4" seed="8"/>
+        <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  1 0 0 0 0" result="rough"/>
+        <feComposite in="soft" in2="rough" operator="arithmetic" k2="1" k3="0.75" k4="-0.38"/>
+        <feComponentTransfer result="edge"><feFuncA type="linear" slope="9" intercept="-4"/></feComponentTransfer>
+        <feTurbulence type="fractalNoise" baseFrequency="0.5" numOctaves="3" seed="15"/>
+        <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  1 0 0 0 0"/>
+        <feComponentTransfer result="specks"><feFuncA type="linear" slope="14" intercept="-10.2"/></feComponentTransfer>
+        <feTurbulence type="fractalNoise" baseFrequency="0.015" numOctaves="2" seed="27"/>
+        <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  1 0 0 0 0"/>
+        <feComponentTransfer result="worn"><feFuncA type="linear" slope="6" intercept="-2.8"/></feComponentTransfer>
+        <feComposite in="specks" in2="worn" operator="in" result="holes"/>
+        <feComposite in="edge" in2="holes" operator="out" result="ink"/>
+        <feMorphology in="SourceGraphic" operator="dilate" radius="1" result="spread"/>
+        <feMerge><feMergeNode in="spread"/><feMergeNode in="SourceGraphic"/></feMerge>
+        <feComposite in2="ink" operator="in"/>
+        <feDropShadow dx="0" dy="2" stdDeviation="1.6" flood-color="#5a0000" flood-opacity="0.7"/>
+      </filter>
+      <filter id="grit-sm-shadow" x="-4%" y="-25%" width="108%" height="160%" color-interpolation-filters="sRGB">
+        <feGaussianBlur in="SourceAlpha" stdDeviation="0.5" result="soft"/>
+        <feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" seed="4"/>
+        <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  1 0 0 0 0" result="rough"/>
+        <feComposite in="soft" in2="rough" operator="arithmetic" k2="1" k3="0.45" k4="-0.22"/>
+        <feComponentTransfer result="edge"><feFuncA type="linear" slope="7" intercept="-3"/></feComponentTransfer>
+        <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" seed="6"/>
+        <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  1 0 0 0 0"/>
+        <feComponentTransfer result="specks"><feFuncA type="linear" slope="14" intercept="-10.5"/></feComponentTransfer>
+        <feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="31"/>
+        <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  1 0 0 0 0"/>
+        <feComponentTransfer result="worn"><feFuncA type="linear" slope="6" intercept="-2.8"/></feComponentTransfer>
+        <feComposite in="specks" in2="worn" operator="in" result="holes"/>
+        <feComposite in="edge" in2="holes" operator="out" result="ink"/>
+        <feMorphology in="SourceGraphic" operator="dilate" radius="0.6" result="spread"/>
+        <feMerge><feMergeNode in="spread"/><feMergeNode in="SourceGraphic"/></feMerge>
+        <feComposite in2="ink" operator="in"/>
+        <feDropShadow dx="0" dy="2" stdDeviation="1.6" flood-color="#5a0000" flood-opacity="0.7"/>
+      </filter>
     </defs>
   </svg>
   <header>
@@ -97,7 +136,6 @@
       <button id="to-live" class="pill">Live view</button>
       <button id="delete" class="pill danger" hidden>Delete</button>
     </div>
-    <p class="hint">Arrow keys work too. Drawings show up here when the badge is erased.</p>
   </main>
 
   <script src="app.js"></script>

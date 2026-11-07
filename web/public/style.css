@@ -27,7 +27,7 @@ body {
 header {
   max-width: 1000px;
   margin: 0 auto;
-  padding: 28px 16px 12px;
+  padding: 36px var(--gutter) 28px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -43,7 +43,7 @@ h1 {
   filter: url(#grit);
 }
 .defs { position: absolute; width: 0; height: 0; overflow: hidden; }
-:root { --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace; }
+:root { --gutter: clamp(20px, 5vw, 56px); --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace; }
 
 .status {
   display: inline-flex; align-items: center; gap: 8px;
@@ -61,7 +61,7 @@ h1 {
 }
 @media (prefers-reduced-motion: reduce) { .status .dot { animation: none !important; } }
 
-main { max-width: 1000px; margin: 0 auto; padding: 0 16px 40px; }
+main { max-width: 1000px; margin: 0 auto; padding: 0 var(--gutter) 48px; }
 
 .frame {
   position: relative;
@@ -78,8 +78,8 @@ main { max-width: 1000px; margin: 0 auto; padding: 0 16px 40px; }
 #line { stroke: var(--line); }
 #pen { fill: var(--accent); }
 #empty { fill: #9a9a9a; font: 500 24px "IBM Plex Mono", monospace; }
-#stamp { fill: #fff; font: 800 34px Inter, sans-serif; letter-spacing: -0.02em; text-transform: uppercase; filter: url(#grit); }
-#count { fill: rgba(255, 255, 255, 0.85); font: 500 18px "IBM Plex Mono", monospace; letter-spacing: 0.08em; filter: url(#grit-sm); }
+#stamp { fill: #fff; font: 800 34px Inter, sans-serif; letter-spacing: -0.02em; text-transform: uppercase; filter: url(#grit-shadow); }
+#count { fill: rgba(255, 255, 255, 0.85); font: 500 18px "IBM Plex Mono", monospace; letter-spacing: 0.08em; filter: url(#grit-sm-shadow); }
 #live-tag rect { fill: var(--accent); }
 #live-tag circle { fill: #fff; animation: blink 1.2s steps(2) infinite; }
 #live-tag text { fill: #fff; font: 600 16px "IBM Plex Mono", monospace; letter-spacing: 0.08em; }
@@ -148,7 +148,6 @@ main { max-width: 1000px; margin: 0 auto; padding: 0 16px 40px; }
 .icon:hover { filter: brightness(1.25); }
 .icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .icon svg .fill { fill: currentColor; stroke: none; }
-.hint { text-align: center; color: var(--muted); font: 400 0.78rem/1.5 var(--mono); margin-top: 14px; }
 
 @media (max-width: 520px) {
   header { padding-top: 18px; }
