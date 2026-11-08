@@ -127,10 +127,6 @@
       </svg>
       <button class="knob left" id="left" aria-label="Newer drawing"><span class="grip" aria-hidden="true"></span><span class="cap" aria-hidden="true">‹</span></button>
       <button class="knob right" id="right" aria-label="Older drawing"><span class="grip" aria-hidden="true"></span><span class="cap" aria-hidden="true">›</span></button>
-      <div class="hud" id="hud" hidden>
-        <span class="timer" id="timer">0:30</span>
-        <button class="done" id="done">Done</button>
-      </div>
     </div>
 
     <div class="draw-bar" id="draw-bar" hidden>
@@ -169,6 +165,26 @@
       <p class="admin-note" id="admin-note"></p>
     </section>
   </main>
+
+  <!-- Drawing: just the badge's white screen, filling the window (turned
+       sideways on a phone held upright), with the controls floating over it -->
+  <div class="pad" id="pad" hidden>
+    <canvas id="pad-canvas"></canvas>
+    <div class="pad-ui" id="pad-ui">
+      <span class="timer" id="timer">0:30</span>
+      <button class="pad-btn" id="undo" aria-label="Undo your last line" title="Undo">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14L4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/></svg>
+      </button>
+      <button class="pad-btn" id="clear-mine" aria-label="Erase all your lines" title="Erase mine">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13h10l1-13"/><path d="M9 7V4h6v3"/></svg>
+      </button>
+      <button class="pad-btn" id="fit" aria-label="Zoom to fit" title="Fit">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+      </button>
+      <button class="pad-btn done" id="done">Done</button>
+    </div>
+    <div class="pad-hint" id="pad-hint">Pinch to zoom · drag with two fingers to move</div>
+  </div>
 
   <dialog id="draw-dialog" class="modal">
     <form method="dialog">

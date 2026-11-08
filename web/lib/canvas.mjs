@@ -1,6 +1,8 @@
 // Shared state for the open canvas and the template, in the "canvas" blob store.
 //
-//   state      {open, cv, owner, strokes: [b64...], web, points, tv}
+//   state      {open, cv, owner, strokes: [b64...], by: [who...], web, points, tv}
+//              by[i] says who drew strokes[i] (a hashed visitor id, "" for the
+//              seed), so a visitor can undo or clear their own lines.
 //              cv counts canvas rounds: it goes up whenever the strokes are
 //              cleared, so a client holding an old cv knows to start over.
 //              owner is the badge drawing the strokes belong to (its id); when
@@ -29,11 +31,14 @@ export function encodePoints(pts) {
 }
 const SEED_B64 = encodePoints(SEED);
 
-const fresh = () => ({ open: false, cv: 1, owner: "", strokes: [], web: 0, points: 0, tv: 0 });
+const fresh = () => ({ open: false, cv: 1, owner: "", strokes: [], by: [], web: 0, points: 0, tv: 0 });
 
 export async function readState(s) {
   const r = await s.getWithMetadata("state", { type: "json" });
-  return r && r.data ? { state: { ...fresh(), ...r.data }, etag: r.etag } : { state: fresh(), etag: null };
+  if (!r || !r.data) return { state: fresh(), etag: null };
+  const state = { ...fresh(), ...r.data };
+  while (state.by.length < state.strokes.length) state.by.push("");
+  return { state, etag: r.etag };
 }
 
 // Read-modify-write that survives many phones posting at once: the write only
@@ -54,6 +59,7 @@ export async function updateState(s, fn) {
 // A new round: the seed picture if the canvas is open, otherwise nothing
 export function resetStrokes(state) {
   state.strokes = state.open ? [SEED_B64] : [];
+  state.by = state.open ? [""] : [];
   state.points = state.open ? SEED.length : 0;
   state.web = 0;
   state.cv += 1;
@@ -93,13 +99,32 @@ export function cleanStroke(buf) {
   return out;
 }
 
-export function addStroke(state, pts, owner) {
+export function addStroke(state, pts, owner, who) {
   if (state.points + pts.length > MAX_POINTS) return false;
   if (!state.owner) state.owner = owner || "";
   state.strokes.push(encodePoints(pts));
+  state.by.push(who || "");
   state.points += pts.length;
   state.web += 1;
   return true;
+}
+
+// Take back `who`'s last line (all: every one of theirs this round). The
+// round's version goes up, so the badge and the viewers fetch the lines again
+// and redraw. Returns how many were removed.
+export function removeStrokes(state, who, all) {
+  let removed = 0;
+  for (let i = state.strokes.length - 1; i >= 0; i--) {
+    if (!who || state.by[i] !== who) continue;
+    state.points -= Buffer.from(state.strokes[i], "base64").length / 4;
+    state.strokes.splice(i, 1);
+    state.by.splice(i, 1);
+    state.web -= 1;
+    removed++;
+    if (!all) break;
+  }
+  if (removed) state.cv += 1;
+  return removed;
 }
 
 export function summary(state) {

@@ -5,6 +5,7 @@
 //   GET   ?part=template      {tv, name, m}   m: 1-bit mask (see lib/canvas.mjs TPL)
 //   POST  {action: "start"}                   a visitor's 30 s turn: {ok, ms} or 429 {wait}
 //   POST  {action: "stroke", p}               a visitor's line, during their turn
+//   POST  {action: "undo" | "clear-mine"}     take back their last line / all of theirs
 //   POST  {action: "open" | "close" | "clear"}             admin (X-Admin-Key)
 //   POST  {action: "template", name, m}                    admin; m "" clears it
 //
@@ -14,7 +15,7 @@ import { createHash } from "node:crypto";
 import { getStore } from "@netlify/blobs";
 import { json, hasKey, decodePoints } from "../../lib/common.mjs";
 import {
-  canvasStore, readState, updateState, resetStrokes, cleanStroke, addStroke, summary, TPL, turnLimits,
+  canvasStore, readState, updateState, resetStrokes, cleanStroke, addStroke, removeStrokes, summary, TPL, turnLimits,
 } from "../../lib/canvas.mjs";
 
 export const config = { path: "/api/canvas" };
@@ -109,13 +110,28 @@ export default async (req, context) => {
       if (pts.length < 1) return json({ error: "empty" }, 400);
       if (pts.length === 1) pts.push(pts[0]);   // a tap is a dot
       const live = (await getStore({ name: "live", consistency: "strong" }).get("state", { type: "json" })) || {};
+      const who = admin ? "admin" : visitorKey(req, context);
       const { state, ret } = await updateState(s, (st) => {
         if (!st.open && !admin) return "closed";
-        return addStroke(st, pts, live.id) ? "ok" : "full";
+        return addStroke(st, pts, live.id, who) ? "ok" : "full";
       });
       if (ret === "closed") return json({ error: "closed" }, 403);
       if (ret === "full") return json({ error: "canvas full" }, 409);
       return json({ ok: true, ...summary(state) });
+    }
+    case "undo":
+    case "clear-mine": {
+      const who = admin ? "admin" : visitorKey(req, context);
+      if (!admin) {
+        const rec = await s.get(who, { type: "json" });
+        if (!rec || Date.now() - rec.start > DRAW_MS + GRACE_MS) return json({ error: "turn over" }, 403);
+      }
+      let removed = 0;
+      const { state } = await updateState(s, (st) => {
+        removed = removeStrokes(st, who, body.action === "clear-mine");
+        if (!removed) return false;
+      });
+      return json({ ok: true, removed, ...summary(state) });
     }
   }
   return json({ error: "unknown action" }, 400);

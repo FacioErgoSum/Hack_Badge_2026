@@ -23,7 +23,7 @@
   const gripX = leftBtn.querySelector(".grip"), gripY = rightBtn.querySelector(".grip");
   const pngBtn = $("png"), delBtn = $("delete"), tools = $("tools");
   const tplImg = $("tpl"), webG = $("web"), mineG = $("mine"), art = $("art");
-  const hud = $("hud"), timerEl = $("timer"), doneBtn = $("done");
+  const timerEl = $("timer"), doneBtn = $("done");
   const drawBar = $("draw-bar"), drawBtn = $("draw"), dialog = $("draw-dialog");
   const admin = new URLSearchParams(location.search).has("admin");
   const SVGNS = "http://www.w3.org/2000/svg";
@@ -73,7 +73,7 @@
   }
 
   // The canvas lines (or a gallery drawing's). New ones can draw themselves in.
-  function setWeb(strokes, animateFrom = Infinity) {
+  function setWeb(strokes, animate = null) {
     shownStrokes = strokes;
     while (webG.childNodes.length > strokes.length) webG.lastChild.remove();
     strokes.forEach((pts, i) => {
@@ -82,7 +82,7 @@
       const attr = toAttr(pts);
       if (el.getAttribute("points") === attr) return;
       el.setAttribute("points", attr);
-      if (i >= animateFrom) {
+      if (animate && animate.has(i)) {
         el.setAttribute("pathLength", "1");
         el.classList.remove("in");
         el.style.strokeDasharray = "1";
@@ -208,6 +208,7 @@
       renderStatus();
       if (d.canvas) await syncCanvas(d.canvas);
       if (index === 0) renderLive();
+      if (drawing) paintPad();
     } catch (e) {
       console.warn(e);
     }
@@ -217,7 +218,7 @@
   }
 
   // --- Canvas and template ---------------------------------------------------
-  let animateFrom = Infinity;
+  let animateFrom = null;   // which canvas lines to draw in on the next render (a Set)
   async function syncCanvas(sum) {
     try {
       if (sum.cv !== canv.cv || sum.n > canv.strokes.length) {
@@ -225,17 +226,16 @@
         const from = sum.cv !== canv.cv ? 0 : canv.strokes.length;
         const c = await api(`/api/canvas?cv=${canv.cv}&from=${from}`);
         const got = c.s.map(decode);
-        if (c.from === 0) {
-          // A new round (or the first look): draw it all in, unless we just arrived
-          animateFrom = firstLoad ? Infinity : 0;
-          canv.strokes = got;
-        } else {
-          animateFrom = canv.strokes.length;
-          canv.strokes = canv.strokes.concat(got);
-        }
+        const before = new Set(canv.raw || []);
+        const raw = c.from === 0 ? c.s : (canv.raw || []).concat(c.s);
+        canv.strokes = c.from === 0 ? got : canv.strokes.concat(got);
+        canv.raw = raw;
         canv.cv = c.cv;
-        // Our own lines are in there now; drop the local copies once they've all gone
-        if (!drawing && !pending && !queue.length) mineG.replaceChildren();
+        // Draw in only the lines that weren't there before (an undo refetches all)
+        animateFrom = firstLoad ? null : new Set(raw.map((r, i) => (before.has(r) ? -1 : i)).filter((i) => i >= 0));
+        // My lines are on the server now: stop drawing my local copies of them
+        if (!drawing && !pending && !queue.length) mine = [];
+        if (drawing) paintPad();
       }
       Object.assign(canv, { open: sum.open, wn: sum.wn });
       if (sum.tv !== canv.tv) await loadTemplate(sum.tv);
@@ -250,7 +250,7 @@
   async function loadTemplate(tv) {
     const t = await api("/api/canvas?part=template");
     canv.tv = tv;
-    if (!t.m) { tplImg.removeAttribute("href"); tplImg.setAttribute("visibility", "hidden"); return; }
+    if (!t.m) { tplImg.removeAttribute("href"); tplImg.setAttribute("visibility", "hidden"); tplBitmap = null; if (drawing) paintPad(); return; }
     const bits = Uint8Array.from(atob(t.m), (ch) => ch.charCodeAt(0));
     const c = document.createElement("canvas");
     c.width = TPL.w; c.height = TPL.h;
@@ -266,6 +266,8 @@
       }
     }
     g.putImageData(img, 0, 0);
+    tplBitmap = c;
+    if (drawing) paintPad();
     tplImg.setAttribute("href", c.toDataURL());
     tplImg.setAttribute("visibility", index === 0 ? "visible" : "hidden");
   }
@@ -275,7 +277,7 @@
     liveTag.setAttribute("visibility", live.online ? "visible" : "hidden");
     tplImg.setAttribute("visibility", tplImg.getAttribute("href") ? "visible" : "hidden");
     setWeb(canv.strokes, animateFrom);
-    animateFrom = Infinity;
+    animateFrom = null;
     draw(live.pts, { showPen: live.online });
     empty.textContent = live.pts.length > 1 || canv.strokes.length ? "" : live.online ? "Waiting for the knobs to turn…" : "The badge is offline";
     stamp.textContent = "LIVE VIEW";
@@ -395,13 +397,27 @@
   function keepAdminKey(k) { try { localStorage.setItem("adminKey", k); } catch {} }
 
   // --- Drawing on the badge from here (open canvas) ---------------------------
-  // A 30 s turn: lines go out in short pieces as you draw so the badge and other
-  // viewers see them come in, then a 2 minute cooldown before the next turn.
+  // A 30 s turn on a full-window pad that shows just the badge's white screen.
+  // Each line goes out when the finger lifts; Undo / Erase take back your own.
+  // Then a 2 minute cooldown before the next turn.
+  //
+  // The pad does its own coordinate maths (no CSS rotation): frame point ->
+  // "base" (fit the screen into the window, turned 90 degrees clockwise when the
+  // window is taller than wide, so the top of the badge is on the right) ->
+  // zoom (scale z about the window origin, then pan tx, ty).
+  const pad = $("pad"), padCanvas = $("pad-canvas"), padUi = $("pad-ui"), padHint = $("pad-hint");
+  const undoBtn = $("undo"), clearMineBtn = $("clear-mine"), fitBtn = $("fit");
+  const SW = SCREEN.x1 - SCREEN.x0, SH = SCREEN.y1 - SCREEN.y0;
   let drawing = false, turnEnd = 0, turnTimer = 0, cooldownUntil = 0, cooldownTimer = 0;
-  let stroke = null;        // {pts, sent, el} for the finger that's down
-  let queue = [];           // pieces waiting to go out
+  let view = { w: 0, h: 0, rot: false, k: 1, ox: 0, oy: 0, z: 1, tx: 0, ty: 0 };
+  let mine = [];            // my lines this turn: {pts, state: "drawing" | "queued" | "sent"}
+  let queue = [];           // lines waiting to go out, in order
   let pending = 0;          // posts in flight
-  let flushTimer = 0;
+  let current = null;       // the line under the finger
+  const touches = new Map();  // pointerId -> [x, y] in window px
+  let pinch = null;
+  let tplBitmap = null;
+  let padFrame = 0;
 
   try { cooldownUntil = +localStorage.getItem("cooldownUntil") || 0; } catch {}
 
@@ -436,68 +452,220 @@
     return { status: r.status, body: await r.json().catch(() => ({})) };
   }
 
-  function toScreen(e) {
-    const p = art.createSVGPoint();
-    p.x = e.clientX; p.y = e.clientY;
-    const q = p.matrixTransform(art.getScreenCTM().inverse());
-    return [Math.round(Math.min(SCREEN.x1, Math.max(SCREEN.x0, q.x))), Math.round(Math.min(SCREEN.y1, Math.max(SCREEN.y0, q.y)))];
-  }
-
   function encodePts(pts) {
     let bin = "";
-    for (const [x, y] of pts) {
-      bin += String.fromCharCode(x & 255, (x >> 8) & 255, y & 255, (y >> 8) & 255);
-    }
+    for (const [x, y] of pts) bin += String.fromCharCode(x & 255, (x >> 8) & 255, y & 255, (y >> 8) & 255);
     return btoa(bin);
   }
 
-  // Send what's been drawn since the last send. A piece of a stroke still being
-  // drawn starts at the previous piece's last point, so it joins up.
-  function cut(final) {
-    if (!stroke) return;
-    const from = Math.max(0, stroke.sent - 1);
-    if (stroke.pts.length - from >= 2 || (final && stroke.sent === 0)) queue.push(stroke.pts.slice(from));
-    stroke.sent = stroke.pts.length;
-    if (final) stroke = null;
+  // --- Pad geometry ---
+  function layoutPad() {
+    const w = pad.clientWidth, h = pad.clientHeight;
+    const rot = h > w;
+    const margin = 8;
+    const k = rot ? Math.min((h - 2 * margin) / SW, (w - 2 * margin) / SH) : Math.min((w - 2 * margin) / SW, (h - 2 * margin) / SH);
+    const cw = rot ? SH * k : SW * k, ch = rot ? SW * k : SH * k;
+    view = { ...view, w, h, rot, k, ox: (w - cw) / 2, oy: (h - ch) / 2 };
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    padCanvas.width = Math.round(w * dpr);
+    padCanvas.height = Math.round(h * dpr);
+    pad.classList.toggle("rot", rot);
+    // Controls along the badge's top edge, the hint along its bottom: on the
+    // right / left of the window when the screen is turned
+    if (rot) {
+      padUi.style.width = h + "px";
+      padUi.style.transform = `translateX(${w}px) rotate(90deg)`;
+      const hw = padHint.offsetWidth, hh = padHint.offsetHeight;
+      padHint.style.cssText = `left:0;top:0;bottom:auto;transform-origin:0 0;transform:translate(${14 + hh}px, ${(h - hw) / 2}px) rotate(90deg)`;
+    } else {
+      padUi.style.width = "100%";
+      padUi.style.transform = "";
+      padHint.style.cssText = "";
+    }
+    clampPan();
+    paintPad();
   }
+  function toBase(fx, fy) {   // frame -> window px at zoom 1
+    const x = (fx - SCREEN.x0) * view.k, y = (fy - SCREEN.y0) * view.k;
+    return view.rot ? [view.ox + SH * view.k - y, view.oy + x] : [view.ox + x, view.oy + y];
+  }
+  function toFrame(px, py) {  // window px -> frame, clamped to the screen
+    const bx = (px - view.tx) / view.z, by = (py - view.ty) / view.z;
+    let x, y;
+    if (view.rot) { x = by - view.oy; y = view.ox + SH * view.k - bx; }
+    else { x = bx - view.ox; y = by - view.oy; }
+    const fx = SCREEN.x0 + x / view.k, fy = SCREEN.y0 + y / view.k;
+    return [Math.round(Math.min(SCREEN.x1, Math.max(SCREEN.x0, fx))), Math.round(Math.min(SCREEN.y1, Math.max(SCREEN.y0, fy)))];
+  }
+  function clampPan() {
+    // Keep the screen from sliding off: at zoom 1 it's centred, zoomed in its
+    // edges can't come further in than the window's
+    const z = view.z;
+    if (z <= 1.001) { view.z = 1; view.tx = view.ty = 0; return; }
+    const [ax, ay] = toBase(SCREEN.x0, SCREEN.y0), [bx, by] = toBase(SCREEN.x1, SCREEN.y1);
+    const x0 = Math.min(ax, bx) * z, x1 = Math.max(ax, bx) * z, y0 = Math.min(ay, by) * z, y1 = Math.max(ay, by) * z;
+    view.tx = Math.min(-x0 + 8, Math.max(view.w - x1 - 8, view.tx));
+    view.ty = Math.min(-y0 + 8, Math.max(view.h - y1 - 8, view.ty));
+  }
+
+  function paintPad() {
+    cancelAnimationFrame(padFrame);
+    padFrame = requestAnimationFrame(() => {
+      const g = padCanvas.getContext("2d");
+      const dpr = padCanvas.width / Math.max(1, view.w);
+      g.setTransform(1, 0, 0, 1, 0, 0);
+      g.fillStyle = "#e9e7e2";
+      g.fillRect(0, 0, padCanvas.width, padCanvas.height);
+      // window px -> device px, zoom, then frame -> base
+      g.setTransform(dpr * view.z, 0, 0, dpr * view.z, dpr * view.tx, dpr * view.ty);
+      if (view.rot) { g.translate(view.ox + SH * view.k, view.oy); g.rotate(Math.PI / 2); }
+      else g.translate(view.ox, view.oy);
+      g.scale(view.k, view.k);
+      g.translate(-SCREEN.x0, -SCREEN.y0);
+      // the screen
+      g.fillStyle = "#fff";
+      g.shadowColor = "rgba(0,0,0,0.25)"; g.shadowBlur = 12 / view.k;
+      g.fillRect(SCREEN.x0, SCREEN.y0, SW, SH);
+      g.shadowBlur = 0;
+      g.save();
+      g.beginPath(); g.rect(SCREEN.x0, SCREEN.y0, SW, SH); g.clip();
+      if (tplBitmap) g.drawImage(tplBitmap, TPL.x0, TPL.y0, TPL.w, TPL.h);
+      g.lineCap = "round"; g.lineJoin = "round"; g.lineWidth = 3;
+      const line = (pts) => {
+        if (!pts.length) return;
+        g.beginPath();
+        g.moveTo(pts[0][0], pts[0][1]);
+        if (pts.length === 1) g.lineTo(pts[0][0] + 0.01, pts[0][1]);
+        for (let i = 1; i < pts.length; i++) g.lineTo(pts[i][0], pts[i][1]);
+        g.stroke();
+      };
+      g.strokeStyle = "#3b3b3b";
+      canv.strokes.forEach(line);
+      g.lineCap = "square"; g.lineJoin = "miter";
+      line(live.pts);
+      g.lineCap = "round"; g.lineJoin = "round";
+      g.strokeStyle = "#111";
+      for (const m of mine) if (m.state !== "gone") line(m.pts);
+      g.restore();
+      undoBtn.disabled = !mine.some((m) => m.state !== "gone" && m.state !== "drawing");
+      clearMineBtn.disabled = undoBtn.disabled;
+    });
+  }
+
+  // --- Sending ---
   async function pump() {
     while (queue.length && pending === 0) {
-      const pts = queue.shift();
+      const m = queue.shift();
+      if (m.state === "gone") continue;
       pending++;
       try {
-        const r = await canvasPost({ action: "stroke", p: encodePts(pts) });
-        if (r.status === 403 && r.body.error === "turn over") queue = [];
-      } catch (e) { console.warn(e); }
+        const r = await canvasPost({ action: "stroke", p: encodePts(m.pts) });
+        if (r.status === 200) m.state = "sent";
+        else { m.state = "gone"; if (r.body.error === "turn over") queue = []; }
+      } catch (e) { console.warn(e); m.state = "gone"; }
       pending--;
+      paintPad();
     }
   }
-  function flush() { cut(false); pump(); }
+  function finishLine() {
+    if (!current) return;
+    current.state = "queued";
+    queue.push(current);
+    current = null;
+    pump();
+  }
 
-  art.addEventListener("pointerdown", (e) => {
+  async function undo(all) {
+    // Lines not sent yet just go; sent ones are taken back on the server
+    const live_ = mine.filter((m) => m.state === "queued" || m.state === "sent");
+    if (!live_.length) return;
+    const targets = all ? live_ : [live_[live_.length - 1]];
+    const needServer = targets.some((m) => m.state === "sent");
+    targets.forEach((m) => (m.state = m.state === "sent" ? "taking" : "gone"));
+    paintPad();
+    if (!needServer) return;
+    await new Promise((r) => { const wait = () => (pending ? setTimeout(wait, 50) : r()); wait(); });
+    const r = await canvasPost({ action: all ? "clear-mine" : "undo" });
+    targets.forEach((m) => { if (m.state === "taking") m.state = r.status === 200 ? "gone" : "sent"; });
+    if (r.status === 200 && r.body.cv) await syncCanvas({ open: r.body.open, cv: r.body.cv, n: r.body.n, wn: r.body.wn, tv: r.body.tv });
+    paintPad();
+  }
+  undoBtn.addEventListener("click", () => undo(false));
+  clearMineBtn.addEventListener("click", () => undo(true));
+  fitBtn.addEventListener("click", () => { view.z = 1; clampPan(); paintPad(); });
+
+  // --- Touch / mouse ---
+  const local = (e) => { const r = padCanvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+  padCanvas.addEventListener("pointerdown", (e) => {
     if (!drawing) return;
     e.preventDefault();
-    art.setPointerCapture(e.pointerId);
-    const el = document.createElementNS(SVGNS, "polyline");
-    mineG.appendChild(el);
-    stroke = { pts: [toScreen(e)], sent: 0, el, id: e.pointerId };
-    el.setAttribute("points", toAttr(stroke.pts.concat(stroke.pts)));
+    try { padCanvas.setPointerCapture(e.pointerId); } catch {}
+    touches.set(e.pointerId, local(e));
+    if (touches.size === 1) {
+      current = { pts: [toFrame(...local(e))], state: "drawing", id: e.pointerId };
+      mine.push(current);
+    } else if (touches.size === 2) {
+      // A second finger: this is a pinch, not a line. Drop a line that's barely begun.
+      if (current) {
+        if (current.pts.length < 6) { current.state = "gone"; mine = mine.filter((m) => m !== current); current = null; }
+        else finishLine();
+      }
+      const [a, b] = [...touches.values()];
+      pinch = { d: Math.hypot(a[0] - b[0], a[1] - b[1]) || 1, mid: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], z: view.z, tx: view.tx, ty: view.ty };
+      padHint.classList.add("gone");
+    }
+    paintPad();
   });
-  art.addEventListener("pointermove", (e) => {
-    if (!drawing || !stroke || e.pointerId !== stroke.id) return;
+  padCanvas.addEventListener("pointermove", (e) => {
+    if (!drawing || !touches.has(e.pointerId)) return;
     e.preventDefault();
-    const p = toScreen(e), last = stroke.pts[stroke.pts.length - 1];
-    if (Math.abs(p[0] - last[0]) + Math.abs(p[1] - last[1]) < 2) return;
-    stroke.pts.push(p);
-    stroke.el.setAttribute("points", toAttr(stroke.pts));
+    touches.set(e.pointerId, local(e));
+    if (pinch && touches.size >= 2) {
+      const [a, b] = [...touches.values()];
+      const d = Math.hypot(a[0] - b[0], a[1] - b[1]) || 1;
+      const mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+      const z = Math.min(6, Math.max(1, pinch.z * d / pinch.d));
+      // the point under the fingers' midpoint stays under it
+      view.z = z;
+      view.tx = mid[0] - ((pinch.mid[0] - pinch.tx) / pinch.z) * z;
+      view.ty = mid[1] - ((pinch.mid[1] - pinch.ty) / pinch.z) * z;
+      clampPan();
+      paintPad();
+      return;
+    }
+    if (current && e.pointerId === current.id) {
+      const p = toFrame(...local(e)), last = current.pts[current.pts.length - 1];
+      if (Math.abs(p[0] - last[0]) + Math.abs(p[1] - last[1]) < 2 / view.z) return;
+      current.pts.push(p);
+      paintPad();
+    }
   });
   const lift = (e) => {
-    if (!stroke || e.pointerId !== stroke.id) return;
-    cut(true);
-    pump();
+    if (!touches.has(e.pointerId)) return;
+    touches.delete(e.pointerId);
+    if (current && e.pointerId === current.id) finishLine();
+    if (touches.size < 2) pinch = null;
   };
-  art.addEventListener("pointerup", lift);
-  art.addEventListener("pointercancel", lift);
+  padCanvas.addEventListener("pointerup", lift);
+  padCanvas.addEventListener("pointercancel", lift);
+  padCanvas.addEventListener("wheel", (e) => {
+    if (!drawing) return;
+    e.preventDefault();
+    const [mx, my] = local(e);
+    const z = Math.min(6, Math.max(1, view.z * Math.exp(-e.deltaY * 0.002)));
+    view.tx = mx - ((mx - view.tx) / view.z) * z;
+    view.ty = my - ((my - view.ty) / view.z) * z;
+    view.z = z;
+    clampPan();
+    paintPad();
+  }, { passive: false });
+  // iOS Safari pinch-zooms the page itself unless told not to
+  const noGesture = (e) => { if (drawing) e.preventDefault(); };
+  document.addEventListener("gesturestart", noGesture);
+  document.addEventListener("gesturechange", noGesture);
+  window.addEventListener("resize", () => { if (drawing) layoutPad(); });
 
+  // --- The turn ---
   async function startTurn() {
     const r = await canvasPost({ action: "start" });
     if (r.status === 429) {
@@ -509,17 +677,17 @@
     if (r.status !== 200) { alert(r.body.error === "closed" ? "The canvas just closed." : "Couldn't start - try again."); return; }
     drawing = true;
     turnEnd = Date.now() + r.body.ms;
+    mine = []; queue = []; current = null; touches.clear(); pinch = null;
+    view.z = 1; view.tx = view.ty = 0;
     document.body.classList.add("drawing");
-    hud.hidden = false;
+    pad.hidden = false;
     drawBar.hidden = true;
-    // Full screen and sideways where the phone allows it; otherwise CSS turns the frame
+    padHint.classList.remove("gone");
+    setTimeout(() => padHint.classList.add("gone"), 4000);
     try {
-      if (matchMedia("(pointer: coarse)").matches && document.documentElement.requestFullscreen) {
-        await document.documentElement.requestFullscreen({ navigationUI: "hide" });
-        await screen.orientation?.lock?.("landscape");
-      }
+      if (matchMedia("(pointer: coarse)").matches && pad.requestFullscreen) await pad.requestFullscreen({ navigationUI: "hide" });
     } catch {}
-    flushTimer = setInterval(flush, 700);
+    layoutPad();
     tick();
     clearTimeout(livePollTimer);
     pollLive();
@@ -528,25 +696,24 @@
     const left = Math.max(0, turnEnd - Date.now());
     const s = Math.ceil(left / 1000);
     timerEl.textContent = `0:${String(s).padStart(2, "0")}`;
+    timerEl.classList.toggle("low", s <= 5);
     if (left <= 0) return endTurn();
     turnTimer = setTimeout(tick, 250);
   }
   async function endTurn() {
     if (!drawing) return;
     clearTimeout(turnTimer);
-    clearInterval(flushTimer);
-    cut(true);
-    pump();
+    finishLine();
     drawing = false;
-    hud.hidden = true;
+    pad.hidden = true;
     document.body.classList.remove("drawing");
     if (!adminKey(false)) {
       cooldownUntil = turnEnd + 120_000;
       try { localStorage.setItem("cooldownUntil", cooldownUntil); } catch {}
     }
-    try { screen.orientation?.unlock?.(); } catch {}
     try { if (document.fullscreenElement) await document.exitFullscreen(); } catch {}
     renderDrawBar();
+    if (index === 0) renderLive();
   }
   drawBtn.addEventListener("click", () => {
     if (typeof dialog.showModal === "function") dialog.showModal();
