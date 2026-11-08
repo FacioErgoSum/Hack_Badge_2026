@@ -368,7 +368,7 @@
   delBtn.addEventListener("click", async () => {
     const k = keys[index - 1];
     if (!k) return;
-    const key = adminKey(true);
+    const key = adminKey(true).trim();
     if (!key || !confirm("Delete the drawing from " + k.t + "?")) return;
     const r = await fetch("/api/drawings?key=" + encodeURIComponent(k.key), {
       method: "DELETE", headers: { "x-admin-key": key },
@@ -567,13 +567,13 @@
     canvasToggle.textContent = canv.open ? "Close canvas" : "Open canvas";
   }
   async function adminAction(body, okText) {
-    const key = adminKey(true);
+    const key = adminKey(true).trim();
     if (!key) return;
+    keepAdminKey(key);   // the request below reads it from here
     adminNote.textContent = "…";
     const r = await canvasPost(body, true);
-    if (r.status === 401) { forgetAdminKey(); adminNote.textContent = "Wrong admin key."; return; }
+    if (r.status === 401) { forgetAdminKey(); adminNote.textContent = "Wrong admin key - press again to retype it."; return; }
     if (r.status !== 200) { adminNote.textContent = "Didn't work: " + (r.body.error || r.status); return; }
-    keepAdminKey(key);
     adminNote.textContent = okText;
     if (r.body.cv) await syncCanvas({ open: r.body.open, cv: r.body.cv, n: r.body.n, wn: r.body.wn, tv: r.body.tv });
     if (index === 0) renderLive();
