@@ -8,6 +8,8 @@
 //   POST  {action: "undo" | "clear-mine"}     take back their last line / all of theirs
 //   POST  {action: "open" | "close" | "clear"}             admin (X-Admin-Key)
 //   POST  {action: "template", name, m}                    admin; m "" clears it
+//   POST  {action: "import", s: [b64...]}                  admin; lines added to the canvas
+//                                                          (a picture the admin page traced)
 //
 // Visitors only get in while the canvas is open. The badge reads all of this
 // too: /api/live's replies carry the summary so it knows when to fetch.
@@ -64,8 +66,7 @@ export default async (req, context) => {
       const { state } = await updateState(s, (st) => {
         if (st.open === open) return false;
         st.open = open;
-        // Opening on an empty screen puts the seed picture up
-        if (open && st.strokes.length === 0) { resetStrokes(st); st.owner = live.id || ""; }
+        if (open && !st.owner) st.owner = live.id || "";
       });
       return json({ ok: true, ...summary(state) });
     }
@@ -73,6 +74,25 @@ export default async (req, context) => {
       if (!admin) return json({ error: "bad key" }, 401);
       const { state } = await updateState(s, (st) => { resetStrokes(st); });
       return json({ ok: true, ...summary(state) });
+    }
+    case "import": {
+      if (!admin) return json({ error: "bad key" }, 401);
+      if (!Array.isArray(body.s) || !body.s.length || body.s.length > 3000) return json({ error: "bad lines" }, 400);
+      const lines = [];
+      for (const b64 of body.s) {
+        const buf = decodePoints(b64);
+        if (!buf) return json({ error: "bad points" }, 400);
+        const pts = cleanStroke(buf);
+        if (pts.length === 1) pts.push(pts[0]);
+        if (pts.length) lines.push(pts);
+      }
+      const live = (await getStore({ name: "live", consistency: "strong" }).get("state", { type: "json" })) || {};
+      const { state, ret } = await updateState(s, (st) => {
+        for (let i = 0; i < lines.length; i++) if (!addStroke(st, lines[i], live.id, "admin")) return i;
+        return lines.length;
+      });
+      if (ret < lines.length) return json({ error: "canvas full", added: ret }, 409);
+      return json({ ok: true, added: ret, ...summary(state) });
     }
     case "template": {
       if (!admin) return json({ error: "bad key" }, 401);

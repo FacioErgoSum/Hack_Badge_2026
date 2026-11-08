@@ -12,7 +12,7 @@ whatever is being drawn right now, and whether the badge is online.
 | `netlify/functions/live.mjs` | `/api/live`: the drawing in progress and the badge's heartbeat |
 | `netlify/functions/canvas.mjs` | `/api/canvas`: the open canvas and the tracing template |
 | `lib/common.mjs` | Shared bits: keys, point decoding, time formatting |
-| `lib/canvas.mjs`, `lib/seed.mjs` | Canvas state, turn limits, the chip each canvas round starts with |
+| `lib/canvas.mjs` | Canvas state and turn limits |
 | `public/templates.json` | The built-in templates (horse, alien, robot, star, microchip) as lines |
 
 Everything is stored in [Netlify Blobs](https://docs.netlify.com/build/data-and-storage/netlify-blobs/),
@@ -64,10 +64,13 @@ line goes out when the finger lifts and shows up on the badge and everyone's
 live view within a few seconds; Undo / Erase mine take a visitor's own lines
 back off both (the badge redraws).
 
-Each round starts with a microchip drawn in the middle. Shaking the badge (or
-User B) saves the knob line and everyone's lines together as one gallery
-drawing, wipes both screens, and the chip comes back. **Close canvas** stops
-new turns; **Clear canvas** wipes the website's lines without saving them.
+A round starts empty. **Add image to canvas** puts a picture on it as real
+lines (black, like everyone else's - not the grey template): it's fitted to the
+screen, thin lines are traced down their middle, filled shapes become their
+outlines. Shaking the badge (or User B) saves the knob line and everyone's
+lines together as one gallery drawing and wipes both screens for the next
+round. **Close canvas** stops new turns; **Clear canvas** wipes the website's
+lines without saving them.
 
 ## How the badge talks to it
 
@@ -87,7 +90,8 @@ little-endian int16 `x, y` pairs in the 960x672 frame, base64'd.
 | `GET /api/canvas?cv=C&from=n` | | Canvas lines from `n` on (all of them if `C` isn't the current round) |
 | `GET /api/canvas?part=template` | | `{tv, name, m}`: `m` is a 1-bit mask, 88 bytes a row, 412 rows, over x 128-831, y 116-527 |
 | `POST /api/canvas` | `{action: "start"}` / `{action: "stroke", p}` | A visitor's turn and lines |
-| `POST /api/canvas` | `{action: "open" \| "close" \| "clear"}`, `{action: "template", name, m}` | Admin, `X-Admin-Key` |
+| `POST /api/canvas` | `{action: "undo" \| "clear-mine"}` | A visitor takes back their last line / all of theirs |
+| `POST /api/canvas` | `{action: "open" \| "close" \| "clear"}`, `{action: "template", name, m}`, `{action: "import", s}` | Admin, `X-Admin-Key` |
 
 `/api/live` replies carry the canvas summary `{open, cv, n, wn, tv}`, so the
 badge and the page know when to fetch lines or a template. When the badge

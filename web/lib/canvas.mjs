@@ -12,7 +12,6 @@
 //                              badge's upload of that drawing picks them up
 //   ip/<hash>  {start}         when that visitor's 30 s turn started
 import { getStore } from "@netlify/blobs";
-import { SEED } from "./seed.mjs";
 
 export const TPL = { x0: 128, y0: 116, w: 704, h: 412 };   // template mask area, 88 bytes a row
 export const SCREEN = { x0: 132, y0: 121, x1: 826, y1: 524 }; // where lines can go (the badge's pen box)
@@ -29,7 +28,6 @@ export function encodePoints(pts) {
   pts.forEach(([x, y], i) => { b.writeInt16LE(x, i * 4); b.writeInt16LE(y, i * 4 + 2); });
   return b.toString("base64");
 }
-const SEED_B64 = encodePoints(SEED);
 
 const fresh = () => ({ open: false, cv: 1, owner: "", strokes: [], by: [], web: 0, points: 0, tv: 0 });
 
@@ -56,11 +54,11 @@ export async function updateState(s, fn) {
   throw new Error("canvas busy");
 }
 
-// A new round: the seed picture if the canvas is open, otherwise nothing
+// A new round: an empty screen
 export function resetStrokes(state) {
-  state.strokes = state.open ? [SEED_B64] : [];
-  state.by = state.open ? [""] : [];
-  state.points = state.open ? SEED.length : 0;
+  state.strokes = [];
+  state.by = [];
+  state.points = 0;
   state.web = 0;
   state.cv += 1;
 }

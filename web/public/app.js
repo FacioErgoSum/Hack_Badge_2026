@@ -796,6 +796,109 @@
     });
   }
 
+  // A picture -> lines for the canvas, drawn like everyone else's: fit it to the
+  // screen, keep its dark parts (thin lines whole, filled shapes as outlines),
+  // thin that to one-pixel centre lines (Zhang-Suen), follow them into paths
+  // and straighten each path (Douglas-Peucker).
+  function linesFromImage(img) {
+    const W = SW + 1, H = SH + 1, pad = 18;
+    const c = document.createElement("canvas");
+    c.width = W; c.height = H;
+    const g = c.getContext("2d");
+    g.fillStyle = "#fff"; g.fillRect(0, 0, W, H);
+    const k = Math.min((W - 2 * pad) / img.width, (H - 2 * pad) / img.height);
+    const w = img.width * k, h = img.height * k;
+    g.drawImage(img, (W - w) / 2, (H - h) / 2, w, h);
+    const d = g.getImageData(0, 0, W, H).data;
+    const dark = new Uint8Array(W * H);
+    for (let i = 0; i < W * H; i++) dark[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2] < 140 ? 1 : 0;
+    // Filled areas become their outlines; lines up to ~6 px wide stay whole, so
+    // thinning turns them into one line down the middle rather than two edges.
+    // "Inside" = every pixel of the 7x7 square around it is dark (box sums).
+    const R = 3, S = new Uint32Array((W + 1) * (H + 1));
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++)
+      S[(y + 1) * (W + 1) + x + 1] = dark[y * W + x] + S[y * (W + 1) + x + 1] + S[(y + 1) * (W + 1) + x] - S[y * (W + 1) + x];
+    const box = (x0, y0, x1, y1) => S[y1 * (W + 1) + x1] - S[y0 * (W + 1) + x1] - S[y1 * (W + 1) + x0] + S[y0 * (W + 1) + x0];
+    const inside = new Uint8Array(W * H);
+    for (let y = R; y < H - R; y++) for (let x = R; x < W - R; x++)
+      if (box(x - R, y - R, x + R + 1, y + R + 1) === (2 * R + 1) ** 2) inside[y * W + x] = 1;
+    // A dark pixel stays unless it's deep inside a filled area (keep a 2 px rim)
+    const m = new Uint8Array(W * H);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      if (!dark[i]) continue;
+      let deep = true;
+      for (let dy = -2; dy <= 2 && deep; dy++) for (let dx = -2; dx <= 2; dx++) {
+        const u = x + dx, v = y + dy;
+        if (u < 0 || v < 0 || u >= W || v >= H || !inside[v * W + u]) { deep = false; break; }
+      }
+      if (!deep) m[i] = 1;
+    }
+    // Zhang-Suen thinning
+    const at = (x, y) => m[y * W + x];
+    for (let changed = true, pass = 0; changed && pass < 60; pass++) {
+      changed = false;
+      for (const step of [0, 1]) {
+        const del = [];
+        for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+          if (!at(x, y)) continue;
+          const p = [at(x, y - 1), at(x + 1, y - 1), at(x + 1, y), at(x + 1, y + 1), at(x, y + 1), at(x - 1, y + 1), at(x - 1, y), at(x - 1, y - 1)];
+          const b = p.reduce((a, v) => a + v, 0);
+          if (b < 2 || b > 6) continue;
+          let a = 0;
+          for (let j = 0; j < 8; j++) if (!p[j] && p[(j + 1) % 8]) a++;
+          if (a !== 1) continue;
+          if (step === 0 ? (p[0] && p[2] && p[4]) || (p[2] && p[4] && p[6]) : (p[0] && p[2] && p[6]) || (p[0] && p[4] && p[6])) continue;
+          del.push(y * W + x);
+        }
+        if (del.length) { changed = true; for (const i of del) m[i] = 0; }
+      }
+    }
+    // Follow the thin lines: from each loose end first, then round any loops
+    const N8 = [[1, 0], [0, 1], [-1, 0], [0, -1], [1, 1], [-1, 1], [-1, -1], [1, -1]];   // straight steps first
+    const seen = new Uint8Array(W * H);
+    const nbrs = (x, y) => N8.map(([dx, dy]) => [x + dx, y + dy]).filter(([u, v]) => u >= 0 && v >= 0 && u < W && v < H && m[v * W + u]);
+    const paths = [];
+    const walk = (x, y) => {
+      const path = [[x, y]];
+      seen[y * W + x] = 1;
+      for (;;) {
+        const next = nbrs(x, y).find(([u, v]) => !seen[v * W + u]);
+        if (!next) {
+          // Join up with a line already followed, if it ends right here
+          const touch = nbrs(x, y).find(([u, v]) => path.length < 2 || u !== path[path.length - 2][0] || v !== path[path.length - 2][1]);
+          if (touch && path.length > 2) path.push(touch);
+          break;
+        }
+        [x, y] = next;
+        seen[y * W + x] = 1;
+        path.push([x, y]);
+      }
+      if (path.length >= 4) paths.push(path);
+    };
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (m[y * W + x] && !seen[y * W + x] && nbrs(x, y).length === 1) walk(x, y);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (m[y * W + x] && !seen[y * W + x]) walk(x, y);
+    // Straighten (keep corners), then into badge coordinates
+    const rdp = (pts, eps) => {
+      if (pts.length < 3) return pts;
+      const [ax, ay] = pts[0], [bx, by] = pts[pts.length - 1];
+      const len = Math.hypot(bx - ax, by - ay);
+      let worst = 0, at_ = 0;
+      for (let i = 1; i < pts.length - 1; i++) {
+        // distance from the line between the ends - or from the end itself when
+        // the path is a loop that comes back to where it started
+        const dd = len < 0.5 ? Math.hypot(pts[i][0] - ax, pts[i][1] - ay)
+          : Math.abs((bx - ax) * (ay - pts[i][1]) - (ax - pts[i][0]) * (by - ay)) / len;
+        if (dd > worst) { worst = dd; at_ = i; }
+      }
+      if (worst <= eps) return [pts[0], pts[pts.length - 1]];
+      return rdp(pts.slice(0, at_ + 1), eps).slice(0, -1).concat(rdp(pts.slice(at_), eps));
+    };
+    // Drop crumbs (a few pixels left where lines cross at sharp angles)
+    const long = (p) => { let L = 0; for (let i = 1; i < p.length; i++) L += Math.hypot(p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1]); return L >= 8; };
+    return paths.filter(long).map((p) => rdp(p, 0.75).map(([x, y]) => [x + SCREEN.x0, y + SCREEN.y0]));
+  }
+
   if (admin) {
     adminEl.hidden = false;
     fetch("templates.json").then((r) => r.json()).then((list) => {
@@ -832,6 +935,22 @@
     $("tpl-clear").addEventListener("click", () => adminAction({ action: "template", m: "" }, "Template cleared."));
     canvasToggle.addEventListener("click", () =>
       adminAction({ action: canv.open ? "close" : "open" }, canv.open ? "Canvas closed." : "Canvas open: anyone on the site can draw."));
+    const canvasFile = $("canvas-file");
+    $("canvas-image").addEventListener("click", () => canvasFile.click());
+    canvasFile.addEventListener("change", async () => {
+      const f = canvasFile.files[0];
+      canvasFile.value = "";
+      if (!f) return;
+      const img = new Image();
+      img.src = URL.createObjectURL(f);
+      try { await img.decode(); } catch { adminNote.textContent = "Couldn't read that image."; return; }
+      adminNote.textContent = "Tracing " + f.name + "…";
+      await new Promise((r) => setTimeout(r, 30));
+      const lines = linesFromImage(img).filter((l) => l.length >= 2);
+      if (!lines.length) { adminNote.textContent = "No dark lines found in " + f.name + "."; return; }
+      if (!canv.open && !confirm("The canvas is closed. Add the picture anyway? It'll show on the badge now.")) { adminNote.textContent = ""; return; }
+      await adminAction({ action: "import", s: lines.map(encodePts) }, `Added ${f.name} to the canvas as ${lines.length} line${lines.length === 1 ? "" : "s"}.`);
+    });
     $("canvas-clear").addEventListener("click", () => {
       if (confirm("Wipe everyone's lines from the canvas? (The badge's own line stays.)")) adminAction({ action: "clear" }, "Canvas cleared.");
     });
