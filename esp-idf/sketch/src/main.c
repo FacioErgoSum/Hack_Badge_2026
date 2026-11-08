@@ -13,6 +13,11 @@
 // Wi-Fi and the website are set in src/wifi_secrets.h; all of it lives in
 // net.c, in its own task. While you draw, the website's live view follows.
 //
+// From the website's admin panel: a tracing template, shown as a dithered grey
+// outline that stays through erases, and the open canvas, where anyone on the
+// site can draw and their lines show up here too. An erase uploads the knob
+// line and the website's lines together as one drawing.
+//
 // Hardware
 //   Knobs   AS5600 magnetic encoder SAOs, analog OUT on the SAO's GPIO1. Every
 //           AS5600 is at I2C 0x36, so they're read with the ADC. The SAO GPIO1
@@ -501,7 +506,10 @@ static void page_drawing(int i, int n)
 {
   const net_gallery_item_t* it = net_gallery_item(i);
   draw_frame(NULL);
-  if (it) draw_path(it->xy, it->n);
+  if (it) {
+    for (int k = 0; k < it->ns; k++) draw_path(it->s[k].xy, it->s[k].n);
+    draw_path(it->xy, it->n);
+  }
   char num[16];
   snprintf(num, sizeof(num), "%d/%d", i + 1, n);
   caption(X_MIN + 6, num);
@@ -515,7 +523,8 @@ static void page_drawing(int i, int n)
 static int s_px = (X_MIN + X_MAX) / 2, s_py = (Y_MIN + Y_MAX) / 2;
 static float s_fx, s_fy;
 static bool s_single_x = true;   // one-knob mode: which axis it drives
-static uint8_t* s_saved[2];      // the drawing's planes while the gallery is up
+static int s_canvas_drawn;       // website lines on the screen
+static int s_canvas_epoch;       // ...from this round of the canvas
 
 static const char* status_text(void)
 {
@@ -524,17 +533,71 @@ static const char* status_text(void)
   return "no knobs found - AS5600 OUT to SAO GPIO1";
 }
 
+// The template, every other pixel of it so it reads as grey, inside the screen
+static void draw_template(void)
+{
+  net_lock();
+  const uint8_t* m = net_template();
+  if (m) {
+    const int stride = NET_TPL_W / 8;
+    for (int y = 0; y < NET_TPL_H; y++) {
+      int fy = NET_TPL_Y0 + y;
+      if (fy < SCR_Y0 || fy > SCR_Y1) continue;
+      for (int x = 0; x < NET_TPL_W; x++) {
+        int fx = NET_TPL_X0 + x;
+        if (((fx + fy) & 1) || fx < SCR_X0 || fx > SCR_X1) continue;
+        if (m[y * stride + (x >> 3)] & (0x80 >> (x & 7))) epd_pixel(fx, fy, EPD_BLACK);
+      }
+    }
+  }
+  net_unlock();
+}
+
+// Website lines from `from` on; returns how many are on the screen now
+static int draw_canvas(int from)
+{
+  net_lock();
+  int n = net_canvas_count();
+  for (int i = from; i < n; i++) {
+    int np = 0;
+    const int16_t* xy = net_canvas_stroke(i, &np);
+    if (xy) draw_path(xy, np);
+  }
+  net_unlock();
+  return n;
+}
+
+// Everything that should be on the screen, from scratch: the frame, the
+// template, the website's lines and the knob line. Needs an erasing refresh.
+static void redraw_all(void)
+{
+  draw_frame(status_text());
+  draw_template();
+  s_canvas_drawn = draw_canvas(0);
+  s_canvas_epoch = net_canvas_epoch();
+  net_lock();
+  int n = 0;
+  const int16_t* xy = net_path_points(&n);
+  if (xy && n) draw_path(xy, n);
+  net_unlock();
+  stamp(s_px, s_py);
+}
+
 static void erase(epd_refresh_t mode)
 {
   draw_frame(status_text());
+  draw_template();
   stamp(s_px, s_py);
   request_refresh(mode);
 }
 
-// Erase, sending the drawing to the website on the way out
+// Erase, sending the drawing to the website on the way out (with the
+// website's lines that were on it - the server files those with it)
 static void erase_and_upload(uint32_t t)
 {
   if (net_path_finish() && !net_online()) leds_flash(255, 120, 0, 700, t);   // amber: saved for later
+  net_canvas_forget();
+  s_canvas_drawn = 0;
   erase(EPD_FAST_KEEP_RED);
   net_path_begin(s_px, s_py);
 }
@@ -652,9 +715,10 @@ void app_main(void)
       if (g_note && t - g_note_at >= GALLERY_FAIL_MS) leave = true;
 
       if (leave) {
+        // Back to the drawing, with anything that came in from the website meanwhile
         wait_panel_idle();
-        memcpy(epd_plane_bw(), s_saved[0], EPD_PLANE_BYTES);
-        memcpy(epd_plane_red(), s_saved[1], EPD_PLANE_BYTES);
+        redraw_all();
+        (void)net_take_template_changed();
         request_refresh(EPD_FAST_KEEP_RED);
         net_gallery_free();
         net_set_mode(NET_MODE_DRAWING);
@@ -686,14 +750,10 @@ void app_main(void)
       last_activity = t;
     }
     if (button_pressed(&btn_a)) {
-      // Into the gallery: keep the drawing to put back afterwards
-      if (!s_saved[0]) s_saved[0] = heap_caps_malloc(EPD_PLANE_BYTES, MALLOC_CAP_SPIRAM);
-      if (!s_saved[1]) s_saved[1] = heap_caps_malloc(EPD_PLANE_BYTES, MALLOC_CAP_SPIRAM);
-      if (s_saved[0] && s_saved[1]) {
+      // Into the gallery. The drawing is redrawn from its path on the way back.
+      {
         printf("sketch: gallery\n");
         wait_panel_idle();
-        memcpy(s_saved[0], epd_plane_bw(), EPD_PLANE_BYTES);
-        memcpy(s_saved[1], epd_plane_red(), EPD_PLANE_BYTES);
         gallery = true;
         dirty = false;
         net_set_mode(NET_MODE_GALLERY);
@@ -726,6 +786,29 @@ void app_main(void)
         dirty = false;
       }
       last_activity = t;
+    }
+
+    // From the website: a new template, a new round of the canvas, new lines
+    if (!s_epd_busy && !s_req_pending) {
+      bool tpl = net_take_template_changed();
+      int epoch = net_canvas_epoch();
+      bool new_round = epoch != s_canvas_epoch && s_canvas_drawn > 0;
+      if (tpl || new_round) {
+        printf("sketch: %s, redrawing\n", tpl ? "new template" : "canvas cleared");
+        redraw_all();
+        request_refresh(EPD_FAST_KEEP_RED);
+        dirty = false;
+        last_activity = t;
+      } else {
+        s_canvas_epoch = epoch;
+        if (net_canvas_count() > s_canvas_drawn) {
+          s_canvas_drawn = draw_canvas(s_canvas_drawn);
+          if (!dirty) first_change = t;
+          dirty = true;
+          last_move = t - IDLE_REFRESH_MS;   // nothing to wait for: put them up now
+          last_activity = t;
+        }
+      }
     }
 
     // Knobs -> pen

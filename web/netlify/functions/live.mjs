@@ -7,8 +7,14 @@
 //         {need: n} so the badge resends from there. An empty p is a heartbeat.
 //   GET   ?id=...&from=N   site; returns status, and the points from N on if the
 //                          drawing is still `id`, otherwise the whole drawing.
+//
+// Both replies carry the canvas summary {open, cv, n, wn, tv} (see canvas.mjs),
+// so the badge and the site know when there are new lines or a new template.
+// A new drawing id means the badge was erased: the canvas lines that were on
+// it are archived with the old drawing and the next round starts.
 import { getStore } from "@netlify/blobs";
 import { json, hasKey, cleanId, decodePoints, fmtTime } from "../../lib/common.mjs";
+import { canvasStore, readState, updateState, closeRound, summary } from "../../lib/canvas.mjs";
 
 export const config = { path: "/api/live" };
 
@@ -37,7 +43,11 @@ export default async (req) => {
         await s.setJSON("state", cur);
         return json({ need: 0 });
       }
+      const prev = cur.id;
       Object.assign(cur, { id, n: 0, p: "", started: now });
+      const cs = canvasStore();
+      await closeRound(cs, prev);
+      await updateState(cs, (st) => (st.owner || !st.strokes.length ? false : (st.owner = id, undefined)));
     }
     if (id && from !== cur.n) {
       await s.setJSON("state", cur);
@@ -52,7 +62,9 @@ export default async (req) => {
       }
     }
     await s.setJSON("state", cur);
-    return json({ ok: true, n: cur.n });
+    const { state: canvas } = await readState(canvasStore());
+    const c = summary(canvas);
+    return json({ ok: true, n: cur.n, cv: c.cv, cn: c.n, wn: c.wn, tv: c.tv, open: c.open });
   }
 
   if (req.method !== "GET") return json({ error: "method" }, 405);
@@ -62,6 +74,7 @@ export default async (req) => {
   let from = parseInt(url.searchParams.get("from") || "0", 10) || 0;
   if (id !== cur.id || from < 0 || from > cur.n) from = 0;
   const p = from ? Buffer.from(cur.p, "base64").subarray(from * 4).toString("base64") : cur.p;
+  const { state: canvas } = await readState(canvasStore());
 
   return json({
     online: now - (cur.seen || 0) < ONLINE_MS,
@@ -72,5 +85,6 @@ export default async (req) => {
     n: cur.n,
     from,
     p,
+    canvas: summary(canvas),
   });
 };

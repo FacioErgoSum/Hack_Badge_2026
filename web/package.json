@@ -4,6 +4,6 @@
   "type": "module",
   "description": "Gallery and live view for the Supercon 2026 badge Sketch firmware",
   "dependencies": {
-    "@netlify/blobs": "^8.1.0"
+    "@netlify/blobs": "^11.1.8"
   }
 }

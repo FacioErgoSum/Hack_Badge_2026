@@ -5,9 +5,13 @@
 //
 //   POST /api/drawings              {id, p}               a finished drawing
 //   POST /api/live                  {id, from, p, mode}   points since `from`
-//   GET  /api/drawings?format=badge&limit=N   {items: [{t, p}]}
+//   GET  /api/drawings?format=badge&limit=N   {items: [{t, p, s}]}
+//   GET  /api/canvas?cv=C&from=N    {cv, from, s: [...]}   lines from the website
+//   GET  /api/canvas?part=template  {tv, m}                the tracing template
 //
-// p is the points as little-endian int16 x, y pairs, base64'd.
+// p is the points as little-endian int16 x, y pairs, base64'd; s a list of
+// those, one per line. Every /api/live reply also carries the canvas summary
+// {cv, cn, wn, tv, open}, which is how the badge knows to fetch.
 // -----------------------------------------------------------------------------
 #include "net.h"
 
@@ -97,6 +101,19 @@ typedef struct {
   int16_t* xy;
 } drawing_t;
 
+// Template and open canvas. s_srv_* is the server's latest summary (from the
+// live replies); the rest is what the badge holds.
+static uint8_t* s_tpl;
+static volatile bool s_tpl_changed;
+static int s_tv = 0;
+static net_stroke_t* s_strokes;
+static int s_ns, s_ns_cap;
+static int s_cv;
+static volatile int s_epoch;
+static volatile bool s_open;
+static volatile int s_srv_cv, s_srv_cn, s_srv_wn, s_srv_tv;
+#define TPL_BYTES ((NET_TPL_W / 8) * NET_TPL_H)
+
 // Gallery
 static volatile net_gallery_state_t s_gal_state;
 static volatile bool s_gal_req;
@@ -105,6 +122,36 @@ static int s_gal_n;
 
 bool net_online(void) { return s_online; }
 bool net_configured(void) { return BADGE_SERVER[0] && !strstr(BADGE_SERVER, "YOUR-SITE"); }
+
+void net_lock(void)   { xSemaphoreTake(s_mtx, portMAX_DELAY); }
+void net_unlock(void) { xSemaphoreGive(s_mtx); }
+const uint8_t* net_template(void) { return s_tpl; }
+bool net_take_template_changed(void) { bool v = s_tpl_changed; s_tpl_changed = false; return v; }
+int  net_canvas_epoch(void) { return s_epoch; }
+int  net_canvas_count(void) { return s_ns; }
+bool net_canvas_open(void)  { return s_open; }
+const int16_t* net_path_points(int* n) { *n = s_n; return s_pts; }
+
+const int16_t* net_canvas_stroke(int i, int* n)
+{
+  if (i < 0 || i >= s_ns) { *n = 0; return NULL; }
+  *n = s_strokes[i].n;
+  return s_strokes[i].xy;
+}
+
+static void strokes_clear_locked(void)
+{
+  for (int i = 0; i < s_ns; i++) free((void*)s_strokes[i].xy);
+  s_ns = 0;
+}
+
+void net_canvas_forget(void)
+{
+  net_lock();
+  strokes_clear_locked();
+  s_srv_cn = 0;   // wait for the server's word on the next round
+  net_unlock();
+}
 
 bool net_take_uploaded(void)  { bool v = s_ev_uploaded;  s_ev_uploaded = false;  return v; }
 bool net_take_connected(void) { bool v = s_ev_connected; s_ev_connected = false; return v; }
@@ -181,7 +228,8 @@ bool net_path_finish(void)
   for (int i = 1; i < s_n; i++) {
     len += abs(s_pts[2 * i] - s_pts[2 * i - 2]) + abs(s_pts[2 * i + 1] - s_pts[2 * i - 1]);
   }
-  if (len >= MIN_DRAWING_PX) {
+  // Upload if the knobs drew something, or people drew on it from the website
+  if (s_n >= 1 && (len >= MIN_DRAWING_PX || s_srv_wn > 0)) {
     drawing_t* d = calloc(1, sizeof(drawing_t));
     if (d) d->xy = ps_malloc((size_t)s_n * 4);
     if (d && d->xy) {
@@ -199,6 +247,28 @@ bool net_path_finish(void)
   xSemaphoreGive(s_mtx);
   if (s_task) xTaskNotifyGive(s_task);
   return queued;
+}
+
+// base64 -> points in PSRAM (caller frees), or NULL
+static int16_t* b64_points(const char* p, int* n)
+{
+  *n = 0;
+  if (!p) return NULL;
+  size_t plen = strlen(p), cap = plen / 4 * 3 + 4, olen = 0;
+  uint8_t* raw = ps_malloc(cap);
+  if (!raw) return NULL;
+  if (mbedtls_base64_decode(raw, cap, &olen, (const unsigned char*)p, plen) != 0 || olen < 4) {
+    free(raw);
+    return NULL;
+  }
+  *n = (int)(olen / 4);
+  return (int16_t*)raw;
+}
+
+static int json_int(const cJSON* j, const char* k, int def)
+{
+  const cJSON* v = cJSON_GetObjectItem(j, k);
+  return cJSON_IsNumber(v) ? v->valueint : def;
 }
 
 // =============================================================================
@@ -390,6 +460,13 @@ static bool live_send(void)
       else s_live_from = from + count;
     }
     xSemaphoreGive(s_mtx);
+    if (cJSON_GetObjectItem(j, "cv")) {
+      s_srv_cv = json_int(j, "cv", s_srv_cv);
+      s_srv_cn = json_int(j, "cn", s_srv_cn);
+      s_srv_wn = json_int(j, "wn", s_srv_wn);
+      s_srv_tv = json_int(j, "tv", s_srv_tv);
+      s_open = cJSON_IsTrue(cJSON_GetObjectItem(j, "open"));
+    }
     cJSON_Delete(j);
   }
   free(resp);
@@ -402,7 +479,11 @@ static bool live_send(void)
 void net_gallery_free(void)
 {
   if (s_gal_state == NET_GALLERY_LOADING) return;   // the task owns it right now
-  for (int i = 0; i < s_gal_n; i++) free((void*)s_gal[i].xy);
+  for (int i = 0; i < s_gal_n; i++) {
+    free((void*)s_gal[i].xy);
+    for (int k = 0; k < s_gal[i].ns; k++) free((void*)s_gal[i].s[k].xy);
+    free(s_gal[i].s);
+  }
   memset(s_gal, 0, sizeof(s_gal));
   s_gal_n = 0;
   s_gal_state = NET_GALLERY_IDLE;
@@ -439,24 +520,116 @@ static void gallery_fetch(void)
   cJSON_ArrayForEach(it, items) {
     if (n >= GALLERY_LIMIT) break;
     const char* t = cJSON_GetStringValue(cJSON_GetObjectItem(it, "t"));
-    const char* p = cJSON_GetStringValue(cJSON_GetObjectItem(it, "p"));
-    if (!p) continue;
-    size_t plen = strlen(p), cap = plen / 4 * 3 + 4, olen = 0;
-    uint8_t* raw = ps_malloc(cap);
-    if (!raw) break;
-    if (mbedtls_base64_decode(raw, cap, &olen, (const unsigned char*)p, plen) != 0 || olen < 8) {
-      free(raw);
-      continue;
+    int np = 0;
+    int16_t* xy = b64_points(cJSON_GetStringValue(cJSON_GetObjectItem(it, "p")), &np);
+    if (!xy) continue;
+    net_gallery_item_t* g = &s_gal[n];
+    strlcpy(g->t, t ? t : "", sizeof(g->t));
+    g->n = np;
+    g->xy = xy;
+    const cJSON* ss = cJSON_GetObjectItem(it, "s");
+    int cnt = cJSON_GetArraySize(ss);
+    g->s = cnt > 0 ? calloc((size_t)cnt, sizeof(net_stroke_t)) : NULL;
+    g->ns = 0;
+    const cJSON* e;
+    cJSON_ArrayForEach(e, ss) {
+      if (!g->s) break;
+      int ns = 0;
+      int16_t* sxy = b64_points(cJSON_GetStringValue(e), &ns);
+      if (sxy) { g->s[g->ns].xy = sxy; g->s[g->ns].n = ns; g->ns++; }
     }
-    strlcpy(s_gal[n].t, t ? t : "", sizeof(s_gal[n].t));
-    s_gal[n].n = (int)(olen / 4);
-    s_gal[n].xy = (const int16_t*)raw;
     n++;
   }
   cJSON_Delete(j);
   s_gal_n = n;
   printf("net: gallery -> %d, %d drawings\n", status, n);
   s_gal_state = (status == 200) ? NET_GALLERY_READY : NET_GALLERY_FAILED;
+}
+
+// =============================================================================
+// Open canvas and template
+// =============================================================================
+static void canvas_fetch(void)
+{
+  int cv, from;
+  net_lock();
+  cv = s_cv;
+  from = s_ns;
+  net_unlock();
+  char path[64], *resp = NULL;
+  snprintf(path, sizeof(path), "/api/canvas?cv=%d&from=%d", cv, from);
+  int status = http(HTTP_METHOD_GET, path, NULL, &resp);
+  cJSON* j = (status == 200 && resp) ? cJSON_Parse(resp) : NULL;
+  free(resp);
+  if (!j) { printf("net: canvas -> %d\n", status); return; }
+
+  // Decode before taking the lock; the app may be drawing from the list
+  const cJSON* arr = cJSON_GetObjectItem(j, "s");
+  int cnt = cJSON_GetArraySize(arr), got = 0;
+  net_stroke_t* add = cnt ? calloc((size_t)cnt, sizeof(net_stroke_t)) : NULL;
+  const cJSON* e;
+  cJSON_ArrayForEach(e, arr) {
+    if (!add) break;
+    int n = 0;
+    int16_t* xy = b64_points(cJSON_GetStringValue(e), &n);
+    if (xy) { add[got].xy = xy; add[got].n = n; got++; }
+  }
+  int rcv = json_int(j, "cv", cv), rfrom = json_int(j, "from", 0);
+  cJSON_Delete(j);
+
+  net_lock();
+  if (rcv != s_cv) {   // a new round started: what we hold is gone from the screen
+    strokes_clear_locked();
+    s_cv = rcv;
+    s_epoch++;
+  }
+  if (rfrom == s_ns && got) {
+    if (s_ns + got > s_ns_cap) {
+      int cap = (s_ns + got) * 2;
+      net_stroke_t* ns = heap_caps_realloc(s_strokes, (size_t)cap * sizeof(net_stroke_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+      if (ns) { s_strokes = ns; s_ns_cap = cap; }
+    }
+    if (s_ns + got <= s_ns_cap) {
+      memcpy(&s_strokes[s_ns], add, (size_t)got * sizeof(net_stroke_t));
+      s_ns += got;
+      got = 0;   // handed over
+    }
+  }
+  net_unlock();
+  for (int i = 0; i < got; i++) free((void*)add[i].xy);   // out of step: fetch again next time
+  free(add);
+  printf("net: canvas round %d, %d lines\n", rcv, s_ns);
+}
+
+static void template_fetch(void)
+{
+  char* resp = NULL;
+  int status = http(HTTP_METHOD_GET, "/api/canvas?part=template", NULL, &resp);
+  cJSON* j = (status == 200 && resp) ? cJSON_Parse(resp) : NULL;
+  free(resp);
+  if (!j) { printf("net: template -> %d\n", status); return; }
+  int tv = json_int(j, "tv", 0);
+  const char* m = cJSON_GetStringValue(cJSON_GetObjectItem(j, "m"));
+  uint8_t* mask = NULL;
+  if (m && m[0]) {
+    size_t olen = 0;
+    mask = ps_malloc(TPL_BYTES + 4);
+    if (mask && (mbedtls_base64_decode(mask, TPL_BYTES + 4, &olen, (const unsigned char*)m, strlen(m)) != 0 ||
+                 olen != TPL_BYTES)) {
+      free(mask);
+      mask = NULL;
+      printf("net: template is the wrong size\n");
+    }
+  }
+  printf("net: template %d: %s\n", tv, mask ? cJSON_GetStringValue(cJSON_GetObjectItem(j, "name")) : "none");
+  cJSON_Delete(j);
+  net_lock();
+  uint8_t* old = s_tpl;
+  s_tpl = mask;
+  s_tv = tv;
+  s_tpl_changed = true;
+  net_unlock();
+  free(old);
 }
 
 // =============================================================================
@@ -562,6 +735,7 @@ static void net_task(void* arg)
     bool new_drawing = strcmp(last_live_id, s_id) != 0;
     xSemaphoreGive(s_mtx);
     bool due = s_mode_changed || new_drawing || (fresh && t - last_live >= LIVE_MS) ||
+               (s_open && t - last_live >= LIVE_MS) ||   // the canvas is open: check often
                t - last_live >= HEARTBEAT_MS;
     if (due) {
       s_mode_changed = false;
@@ -571,6 +745,15 @@ static void net_task(void* arg)
       if (!live_send()) printf("net: live update failed\n");
       last_live = now_ms();
     }
+
+    // New lines from the website, or a new template?
+    if (s_srv_cv && s_srv_cv != s_cv) {
+      net_lock();
+      if (s_srv_cv != s_cv) { strokes_clear_locked(); s_cv = s_srv_cv; s_epoch++; }
+      net_unlock();
+    }
+    if (s_srv_cn > s_ns) canvas_fetch();
+    if (s_srv_tv != s_tv) template_fetch();
 
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(250));
   }

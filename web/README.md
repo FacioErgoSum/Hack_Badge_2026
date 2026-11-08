@@ -10,7 +10,10 @@ whatever is being drawn right now, and whether the badge is online.
 | `public/` | The page: `index.html`, `app.js`, `style.css`, `etch.png` (the frame) |
 | `netlify/functions/drawings.mjs` | `/api/drawings`: badge uploads, gallery list, delete |
 | `netlify/functions/live.mjs` | `/api/live`: the drawing in progress and the badge's heartbeat |
+| `netlify/functions/canvas.mjs` | `/api/canvas`: the open canvas and the tracing template |
 | `lib/common.mjs` | Shared bits: keys, point decoding, time formatting |
+| `lib/canvas.mjs`, `lib/seed.mjs` | Canvas state, turn limits, the chip each canvas round starts with |
+| `public/templates.json` | The built-in templates (horse, alien, robot, star, microchip) as lines |
 
 Everything is stored in [Netlify Blobs](https://docs.netlify.com/build/data-and-storage/netlify-blobs/),
 so there's no database to set up.
@@ -37,7 +40,29 @@ so there's no database to set up.
 - `‹` / `›` (or the arrow keys) step through the gallery; the far right is the
   live view. Each drawing has its own link (the part after `#`).
 - **Replay** redraws the line the way it was drawn. **Save PNG** downloads it.
-- Open the page with `?admin` on the end to get a **Delete** button.
+- Open the page with `?admin` on the end for the admin panel and a **Delete**
+  button on gallery drawings. It asks for `ADMIN_KEY` once and remembers it.
+
+### Templates
+
+In the admin panel pick a template (or **Upload an image…**: any picture,
+fitted to the screen; thin lines stay as they are, filled shapes become their
+outlines) and **Send to badge**. The badge shows it as a dithered grey outline
+that stays through erases until you send another or **Clear template**.
+
+### Open canvas
+
+**Open canvas** lets anyone on the site draw on the badge. The live view gets a
+**Draw on the badge** button: a popup explains the rules, then that visitor has
+30 seconds of finger (or mouse) drawing - the frame fills the screen, turned
+sideways on a phone held upright - followed by a 2 minute cooldown (counted per
+IP address on the server, so a reload doesn't skip it). Lines go out as they're
+drawn and show up on the badge and everyone's live view within a few seconds.
+
+Each round starts with a microchip drawn in the middle. Shaking the badge (or
+User B) saves the knob line and everyone's lines together as one gallery
+drawing, wipes both screens, and the chip comes back. **Close canvas** stops
+new turns; **Clear canvas** wipes the website's lines without saving them.
 
 ## How the badge talks to it
 
@@ -54,5 +79,15 @@ little-endian int16 `x, y` pairs in the 960x672 frame, base64'd.
 | `DELETE /api/drawings?key=...` | | Needs `X-Admin-Key: <ADMIN_KEY>` |
 | `GET /api/live?id=...&from=n` | | Status, and the live points from `n` on |
 
+| `GET /api/canvas?cv=C&from=n` | | Canvas lines from `n` on (all of them if `C` isn't the current round) |
+| `GET /api/canvas?part=template` | | `{tv, name, m}`: `m` is a 1-bit mask, 88 bytes a row, 412 rows, over x 128-831, y 116-527 |
+| `POST /api/canvas` | `{action: "start"}` / `{action: "stroke", p}` | A visitor's turn and lines |
+| `POST /api/canvas` | `{action: "open" \| "close" \| "clear"}`, `{action: "template", name, m}` | Admin, `X-Admin-Key` |
+
+`/api/live` replies carry the canvas summary `{open, cv, n, wn, tv}`, so the
+badge and the page know when to fetch lines or a template. When the badge
+starts a new drawing (it was erased), the lines that were on the old one are
+archived and attached to its upload.
+
 The badge counts as online if it checked in within the last 45 seconds (it
-does every 15).
+does every 15, every 2 while the canvas is open).

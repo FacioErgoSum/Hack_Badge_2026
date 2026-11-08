@@ -6,11 +6,15 @@
 //           ?format=badge&limit=8       newest drawings, trimmed for the badge
 //   DELETE  ?key=d/...                  header X-Admin-Key
 //
+// A drawing is the badge's pen path p, plus s: the lines people drew on it from
+// the website while the canvas was open (and the seed picture), if any.
+//
 // Stored in the "drawings" blob store as d/<15-digit ms>-<badge id>, so key
 // order is time order. id/<badge id> points back at the key, which makes a
 // retried upload a no-op instead of a duplicate.
 import { getStore } from "@netlify/blobs";
 import { json, hasKey, cleanId, decodePoints, fmtTime } from "../../lib/common.mjs";
+import { canvasStore, closeRound, takeArchived } from "../../lib/canvas.mjs";
 
 export const config = { path: "/api/drawings" };
 
@@ -24,7 +28,7 @@ async function listKeys(s) {
 const tsOf = (key) => Number(key.slice(2, 17));
 
 function view(key, d) {
-  return { key, id: d.id, ts: d.ts, t: fmtTime(d.ts), n: d.n, p: d.p };
+  return { key, id: d.id, ts: d.ts, t: fmtTime(d.ts), n: d.n, p: d.p, s: d.s || [] };
 }
 
 export default async (req) => {
@@ -38,14 +42,19 @@ export default async (req) => {
     try { body = await req.json(); } catch { return json({ error: "bad json" }, 400); }
     const id = cleanId(body.id);
     const pts = decodePoints(body.p);
-    if (!id || !pts || pts.length < 8) return json({ error: "bad drawing" }, 400);
+    if (!id || !pts || pts.length < 4) return json({ error: "bad drawing" }, 400);
 
     const seen = await s.get(`id/${id}`);
     if (seen) return json({ ok: true, key: seen, duplicate: true });
 
+    // The canvas lines that were on the screen when it was erased
+    const cs = canvasStore();
+    await closeRound(cs, id);
+    const strokes = (await takeArchived(cs, id)) || [];
+
     const ts = Date.now();
     const key = `d/${String(ts).padStart(15, "0")}-${id}`;
-    await s.setJSON(key, { id, ts, n: pts.length / 4, p: body.p });
+    await s.setJSON(key, { id, ts, n: pts.length / 4, p: body.p, s: strokes });
     await s.set(`id/${id}`, key);
     return json({ ok: true, key });
   }
@@ -71,12 +80,12 @@ export default async (req) => {
   const keys = await listKeys(s);
 
   if (q.get("format") === "badge") {
-    // Kept small and flat for cJSON on the badge: just the label and the path
+    // Kept small and flat for cJSON on the badge: the label, the path, the canvas lines
     const limit = Math.min(Math.max(parseInt(q.get("limit") || "8", 10) || 8, 1), 20);
     const items = [];
     for (const key of keys.slice(0, limit)) {
       const d = await s.get(key, { type: "json" });
-      if (d) items.push({ t: fmtTime(d.ts), p: d.p });
+      if (d) items.push({ t: fmtTime(d.ts), p: d.p, s: d.s || [] });
     }
     return json({ total: keys.length, items });
   }

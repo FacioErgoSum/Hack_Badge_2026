@@ -26,6 +26,12 @@ The badge's own network work all happens in `src/net.c` on core 0, so a slow
 or missing network never holds up the knobs or the panel. The badge is 2.4 GHz
 only, and it can't get past a captive sign-in page.
 
+**Templates and the open canvas** are run from the website's admin panel
+(see `web/README.md`). A template shows up dithered (every other pixel, so it
+reads grey) and stays through erases. While the canvas is open the badge checks
+in every 2 seconds and draws the website's lines as they arrive; an erase
+uploads them together with the knob line.
+
 **The gallery title card** is a drawing too. Draw it on the badge, erase to
 upload it, then run `python tools/drawing_to_label.py https://YOUR-SITE.netlify.app`
 (newest drawing, or add its key from the site's address bar). That writes

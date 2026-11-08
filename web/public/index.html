@@ -110,7 +110,10 @@
           <clipPath id="screen"><rect x="124" y="116" width="712" height="412" rx="22"/></clipPath>
         </defs>
         <g clip-path="url(#screen)">
+          <image id="tpl" x="128" y="116" width="704" height="412" visibility="hidden" preserveAspectRatio="none"/>
+          <g id="web" class="ink"></g>
           <polyline id="line" fill="none" stroke-width="3" stroke-linecap="square" stroke-linejoin="miter"/>
+          <g id="mine" class="ink"></g>
           <rect id="pen" width="8" height="8" visibility="hidden"/>
           <text id="empty" x="480" y="330" text-anchor="middle"></text>
         </g>
@@ -124,6 +127,14 @@
       </svg>
       <button class="knob left" id="left" aria-label="Newer drawing"><span class="grip" aria-hidden="true"></span><span class="cap" aria-hidden="true">‹</span></button>
       <button class="knob right" id="right" aria-label="Older drawing"><span class="grip" aria-hidden="true"></span><span class="cap" aria-hidden="true">›</span></button>
+      <div class="hud" id="hud" hidden>
+        <span class="timer" id="timer">0:30</span>
+        <button class="done" id="done">Done</button>
+      </div>
+    </div>
+
+    <div class="draw-bar" id="draw-bar" hidden>
+      <button class="draw-btn" id="draw">Draw on the badge</button>
     </div>
 
     <div class="tools" id="tools" hidden>
@@ -136,7 +147,40 @@
       <button id="to-live" class="pill">Live view</button>
       <button id="delete" class="pill danger" hidden>Delete</button>
     </div>
+
+    <section class="admin" id="admin" hidden aria-label="Admin">
+      <h2>Admin</h2>
+      <div class="row">
+        <label for="tpl-select">Template</label>
+        <select id="tpl-select">
+          <option value="">None</option>
+          <option value="upload">Upload an image…</option>
+        </select>
+        <input type="file" id="tpl-file" accept="image/*" hidden>
+        <button class="pill" id="tpl-send">Send to badge</button>
+        <button class="pill" id="tpl-clear">Clear template</button>
+      </div>
+      <div class="row">
+        <span class="label">Canvas</span>
+        <span id="canvas-state" class="state">closed</span>
+        <button class="pill" id="canvas-toggle">Open canvas</button>
+        <button class="pill" id="canvas-clear">Clear canvas</button>
+      </div>
+      <p class="admin-note" id="admin-note"></p>
+    </section>
   </main>
+
+  <dialog id="draw-dialog" class="modal">
+    <form method="dialog">
+      <h2>Draw on the badge</h2>
+      <p>You get <strong>30 seconds</strong> to draw on the screen with your finger. What you draw shows up on the badge a few seconds later.</p>
+      <p>After that there's a <strong>2 minute</strong> cooldown before your next turn.</p>
+      <div class="modal-actions">
+        <button value="cancel" class="pill">Not now</button>
+        <button value="go" class="draw-btn" id="draw-go">Start my 30 seconds</button>
+      </div>
+    </form>
+  </dialog>
 
   <script src="app.js"></script>
 </body>
