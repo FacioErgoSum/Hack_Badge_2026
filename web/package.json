@@ -4,6 +4,12 @@
   "type": "module",
   "description": "Gallery and live view for the Supercon 2026 badge Sketch firmware",
   "dependencies": {
-    "@netlify/blobs": "^11.1.8"
+    "@netlify/blobs": "11.1.7"
+  },
+  "overrides": {
+    "@netlify/otel": "7.0.6",
+    "@fastify/busboy": "3.2.4",
+    "@opentelemetry/semantic-conventions": "1.44.0",
+    "import-in-the-middle": "3.5.3"
   }
 }
