@@ -55,8 +55,9 @@ that stays through erases until you send another or **Clear template**.
 **Open canvas** lets anyone on the site draw on the badge. The live view gets a
 **Draw on the badge** button: a popup explains the rules, then that visitor has
 30 seconds of finger (or mouse) drawing - the frame fills the screen, turned
-sideways on a phone held upright - followed by a 2 minute cooldown (counted per
-IP address on the server, so a reload doesn't skip it). Lines go out as they're
+sideways on a phone held upright - followed by a 2 minute cooldown. The server counts turns per browser (a
+random id each one keeps), not per IP address, since at a conference most
+phones share the venue's address. Lines go out as they're
 drawn and show up on the badge and everyone's live view within a few seconds.
 
 Each round starts with a microchip drawn in the middle. Shaking the badge (or

@@ -21,9 +21,14 @@ export const config = { path: "/api/canvas" };
 
 const MASK_BYTES = (TPL.w / 8) * TPL.h;
 
+// Turns are counted per browser: each one makes up a random id and sends it.
+// Not per IP address - at a conference most phones share the venue's one.
+// Without an id (an old page), fall back to the IP.
 function visitorKey(req, context) {
-  const ip = context?.ip || req.headers.get("x-nf-client-connection-ip") || req.headers.get("x-forwarded-for") || "anon";
-  return "ip/" + createHash("sha256").update("hack-a-sketch:" + ip).digest("hex").slice(0, 24);
+  const id = (req.headers.get("x-visitor") || "").replace(/[^A-Za-z0-9-]/g, "").slice(0, 64);
+  const who = id.length >= 16 ? "v:" + id
+    : "ip:" + (context?.ip || req.headers.get("x-nf-client-connection-ip") || req.headers.get("x-forwarded-for") || "anon");
+  return "ip/" + createHash("sha256").update("hack-a-sketch:" + who).digest("hex").slice(0, 24);
 }
 
 export default async (req, context) => {

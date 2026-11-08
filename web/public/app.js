@@ -420,8 +420,16 @@
     }
   }
 
+  // A random id for this browser, so turns are counted per phone, not per Wi-Fi
+  let visitor = "";
+  try { visitor = localStorage.getItem("visitor") || ""; } catch {}
+  if (!visitor) {
+    visitor = (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now().toString(36)).replace(/[^A-Za-z0-9-]/g, "");
+    try { localStorage.setItem("visitor", visitor); } catch {}
+  }
+
   async function canvasPost(body, useAdmin) {
-    const headers = { "content-type": "application/json" };
+    const headers = { "content-type": "application/json", "x-visitor": visitor };
     const key = adminKey(false);
     if (key && (useAdmin || admin)) headers["x-admin-key"] = key;
     const r = await fetch("/api/canvas", { method: "POST", headers, body: JSON.stringify(body) });
@@ -681,7 +689,7 @@
     const want = decodeURIComponent(location.hash.slice(1));
     const i = keys.findIndex((k) => k.key === want);
     if (i >= 0) index = i + 1;
-    else index = live.online || !keys.length ? 0 : 1;
+    else index = live.online || canv.open || !keys.length ? 0 : 1;   // open canvas: land where you can draw
     render();
   })();
 })();
