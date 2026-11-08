@@ -117,9 +117,11 @@
 // --- Session -----------------------------------------------------------------
 // With the session held open across images the COG keeps its rails, its cached
 // OTP and its latched waveform, so an image costs its plane data plus the
-// refresh instead of a full power-up. Bounded rather than open-ended.
+// refresh instead of a full power-up. Bounded rather than open-ended, and kept
+// short: holding the rails up through hundreds of unbalanced fast updates is
+// hard on the panel. 15 images is ~20 s of drawing before a power cycle.
 #ifndef EPD_SESSION_IMAGES
-#define EPD_SESSION_IMAGES 200
+#define EPD_SESSION_IMAGES 15
 #endif
 
 // Whether a fast refresh may drive the third colour.

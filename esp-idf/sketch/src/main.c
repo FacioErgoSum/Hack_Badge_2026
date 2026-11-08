@@ -71,9 +71,16 @@
 #define LED_TURN_HOLD_MS  400     // a knob's LEDs stay lit this long after a turn
 #define LED_WALL_MS       250     // ...and flash red this long when the pen hits a wall
 #define LED_DOT_STEPS     16      // dot steps per knob revolution
-#define SLEEP_AFTER_MS    30000   // power the panel down after this long idle
-#define CLEAN_EVERY_MS    300000  // full refresh to restore red and black, at most
-#define CLEAN_IDLE_MS     15000   // this often, once the knobs have rested this long
+// Panel care. The fast ink update only ever pushes towards black and re-drives
+// every line already drawn, so it isn't DC-balanced: run it for long stretches
+// with the rails held up and charge builds in the panel (washed-out colours,
+// ghosts, stuck lines). So the rails come down as soon as the knobs rest, a
+// session is capped (EPD_SESSION_IMAGES in epd97_config.h), and a balanced full
+// refresh follows every so many fast updates.
+#define SLEEP_AFTER_MS    2000    // power the panel down after this long idle
+#define CLEAN_EVERY_MS    120000  // full refresh to restore red and black, at most
+#define CLEAN_IDLE_MS     5000    // this often, once the knobs have rested this long
+#define INK_BEFORE_CLEAN  100     // ...or after this many fast line updates
 #define LED_BRIGHTNESS    24      // of 255
 #define INVERT_X          0
 #define INVERT_Y          0
@@ -593,6 +600,7 @@ void app_main(void)
   net_path_begin(s_px, s_py);
 
   bool dirty = false, drawn_since_clean = false;
+  uint32_t ink_since_clean = 0;
   uint32_t first_change = 0, last_move = 0, last_activity = now_ms(), last_clean = now_ms();
 
   // Gallery state
@@ -760,15 +768,19 @@ void app_main(void)
       request_refresh(EPD_FAST_INK);
       dirty = false;
       drawn_since_clean = true;
+      ink_since_clean++;
     }
 
-    // Every few minutes of drawing, once the knobs rest: one full refresh.
-    // Fast line updates leave red and black a little weaker each time.
+    // Every couple of minutes of drawing, or every INK_BEFORE_CLEAN line
+    // updates, once the knobs rest: one balanced full refresh. Fast line
+    // updates leave red and black weaker and charge in the panel each time.
     if (drawn_since_clean && !dirty && !s_epd_busy && !s_req_pending &&
-        t - last_clean >= CLEAN_EVERY_MS && t - last_move >= CLEAN_IDLE_MS) {
-      printf("sketch: periodic full refresh\n");
+        (t - last_clean >= CLEAN_EVERY_MS || ink_since_clean >= INK_BEFORE_CLEAN) &&
+        t - last_move >= CLEAN_IDLE_MS) {
+      printf("sketch: periodic full refresh after %u line updates\n", (unsigned)ink_since_clean);
       request_refresh(EPD_SLOW);
       drawn_since_clean = false;
+      ink_since_clean = 0;
       last_clean = t;
       last_activity = t;
     }
